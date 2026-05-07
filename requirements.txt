@@ -1,11 +1,7 @@
-streamlit==1.44.1
 yfinance==0.2.66
-finance-datareader>=0.9.110
-pandas>=2.0.3,<2.4
-numpy>=1.24,<2.1
-plotly>=5.17.0
+finance-datareader
+plotly
 ta==0.11.0
-requests>=2.31
-beautifulsoup4>=4.11
-lxml>=4.9
-tqdm>=4.60
+requests
+beautifulsoup4
+lxml
