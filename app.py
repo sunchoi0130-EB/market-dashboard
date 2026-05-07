@@ -45,6 +45,34 @@ SECTOR_ETFS = {
 
 WATCHLIST = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOGL", "JPM", "XOM", "GLD"]
 
+TICKER_NAMES = {
+    "AAPL": "Apple",
+    "MSFT": "Microsoft",
+    "NVDA": "NVIDIA",
+    "TSLA": "Tesla",
+    "AMZN": "Amazon",
+    "META": "Meta",
+    "GOOGL": "Alphabet (Google)",
+    "JPM": "JP Morgan",
+    "XOM": "ExxonMobil",
+    "GLD": "금 ETF",
+    **{k: f"{v} ETF" for k, v in SECTOR_ETFS.items()},
+}
+
+# 한국 시총 상위 10 — fdr.StockListing 실패 시 fallback
+KOSPI_FALLBACK = [
+    {"코드": "005930", "종목명": "삼성전자"},
+    {"코드": "000660", "종목명": "SK하이닉스"},
+    {"코드": "373220", "종목명": "LG에너지솔루션"},
+    {"코드": "207940", "종목명": "삼성바이오로직스"},
+    {"코드": "005380", "종목명": "현대차"},
+    {"코드": "000270", "종목명": "기아"},
+    {"코드": "068270", "종목명": "셀트리온"},
+    {"코드": "105560", "종목명": "KB금융"},
+    {"코드": "055550", "종목명": "신한지주"},
+    {"코드": "028260", "종목명": "삼성물산"},
+]
+
 PHASE_COLORS = {
     "강세": "#00C851",
     "경계": "#FFD700",
@@ -172,7 +200,7 @@ def fetch_us_indices() -> pd.DataFrame:
             cur = float(latest[t]) if t in latest else float("nan")
             prv = float(prev[t]) if t in prev else float("nan")
             chg = (cur - prv) / prv * 100 if prv else float("nan")
-            rows.append({"지수": US_INDICES[t], "현재가": cur, "등락률(%)": round(chg, 2)})
+            rows.append({"지수": US_INDICES[t], "현재가": f"{cur:,.2f}", "등락률(%)": round(chg, 2)})
         return pd.DataFrame(rows)
     except Exception:
         return pd.DataFrame()
@@ -190,9 +218,9 @@ def fetch_sector_performance() -> pd.DataFrame:
         p1d = (close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100
         p1m = (close.iloc[-1] - close.iloc[0])  / close.iloc[0]  * 100
         return pd.DataFrame({
-            "ETF":    tickers,
-            "섹터":   list(SECTOR_ETFS.values()),
-            "1일(%)": [round(float(p1d[t]), 2) for t in tickers],
+            "ETF":      tickers,
+            "섹터":     list(SECTOR_ETFS.values()),
+            "1일(%)":   [round(float(p1d[t]), 2) for t in tickers],
             "1개월(%)": [round(float(p1m[t]), 2) for t in tickers],
         })
     except Exception:
@@ -234,15 +262,18 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
                 signals.append("SMA200 아래")
                 sell_cnt += 1
 
+            # 종목명 조회 (섹터 ETF 또는 워치리스트)
+            base = ticker.replace(".KS", "")
+            name = TICKER_NAMES.get(base, base)
+
             rows.append({
-                "티커":     ticker,
+                "티커":     ticker.replace(".KS", ""),
+                "종목명":   name,
                 "현재가":   round(price, 2),
                 "RSI(14)":  round(rsi_val, 1),
-                "SMA50":    round(sma50, 2),
-                "SMA200":   round(sma200, 2),
-                "신호":     " | ".join(signals),
                 "매수신호": buy_cnt,
                 "매도신호": sell_cnt,
+                "신호 내역": " | ".join(signals),
             })
         except Exception:
             continue
@@ -254,7 +285,10 @@ def fetch_korean_indices() -> dict:
     result: dict[str, dict] = {}
     for symbol, name in [("KS11", "KOSPI"), ("KQ11", "KOSDAQ")]:
         try:
-            df = fdr.DataReader(symbol, start=(pd.Timestamp.today() - pd.Timedelta(days=14)).strftime("%Y-%m-%d"))
+            df = fdr.DataReader(
+                symbol,
+                start=(pd.Timestamp.today() - pd.Timedelta(days=14)).strftime("%Y-%m-%d"),
+            )
             latest = float(df["Close"].iloc[-1])
             prev   = float(df["Close"].iloc[-2])
             result[name] = {
@@ -270,15 +304,23 @@ def fetch_korean_indices() -> dict:
 def fetch_kospi_top10() -> pd.DataFrame:
     try:
         listing = fdr.StockListing("KOSPI")
-        cols = [c for c in ["Code", "Name", "Close", "Marcap"] if c in listing.columns]
-        top10 = listing.head(10)[cols].copy()
-        if "Marcap" in top10.columns:
-            top10["시총(조)"] = (top10["Marcap"] / 1e12).round(1)
-            top10 = top10.drop(columns=["Marcap"])
-        top10 = top10.rename(columns={"Code": "코드", "Name": "종목명", "Close": "현재가"})
-        return top10.reset_index(drop=True)
+        # 컬럼명 정규화
+        listing.columns = [c.strip() for c in listing.columns]
+        code_col = next((c for c in listing.columns if c in ("Code", "Symbol", "code")), None)
+        name_col = next((c for c in listing.columns if c in ("Name", "name", "종목명")), None)
+        cap_col  = next((c for c in listing.columns if c in ("Marcap", "MarCap", "시가총액")), None)
+
+        if code_col and name_col:
+            top10 = listing.head(10)[[code_col, name_col]].copy()
+            top10 = top10.rename(columns={code_col: "코드", name_col: "종목명"})
+            if cap_col:
+                top10["시총(조)"] = (listing.head(10)[cap_col] / 1e12).round(1).values
+            return top10.reset_index(drop=True)
     except Exception:
-        return pd.DataFrame()
+        pass
+
+    # fallback: 하드코딩된 시총 상위 10
+    return pd.DataFrame(KOSPI_FALLBACK)
 
 
 @st.cache_data(ttl=600)
@@ -316,12 +358,9 @@ def phase_badge(phase: str) -> None:
     st.markdown(
         f"""
         <div style="
-            text-align:center;
-            padding:24px 16px;
-            background:{color}18;
-            border:2px solid {color};
-            border-radius:14px;
-            margin-bottom:16px;
+            text-align:center; padding:24px 16px;
+            background:{color}18; border:2px solid {color};
+            border-radius:14px; margin-bottom:16px;
         ">
           <div style="color:{color}; font-size:3rem; font-weight:900; letter-spacing:4px;">
             {phase}
@@ -335,14 +374,6 @@ def phase_badge(phase: str) -> None:
     )
 
 
-def color_val(val: float) -> str:
-    if val > 0:
-        return f"<span style='color:#00C851'>+{val:.2f}%</span>"
-    elif val < 0:
-        return f"<span style='color:#FF3547'>{val:.2f}%</span>"
-    return f"{val:.2f}%"
-
-
 def highlight_signals(row: pd.Series) -> list[str]:
     if row.get("매수신호", 0) >= 2:
         return ["background-color:#0d3b1f"] * len(row)
@@ -351,23 +382,41 @@ def highlight_signals(row: pd.Series) -> list[str]:
     return [""] * len(row)
 
 
-def fg_score_bar(score: float) -> str:
-    pct = int(score)
-    if score < 25:
-        bar_color = "#FF3547"
-    elif score < 45:
-        bar_color = "#FF8800"
-    elif score < 55:
-        bar_color = "#FFD700"
-    elif score < 75:
-        bar_color = "#90EE90"
-    else:
-        bar_color = "#00C851"
-    return (
-        f"<div style='background:#333;border-radius:6px;height:12px;width:100%;'>"
-        f"<div style='background:{bar_color};width:{pct}%;height:100%;border-radius:6px;'></div>"
-        f"</div>"
-    )
+def signal_legend() -> None:
+    with st.expander("신호 읽는 법 (클릭해서 열기)"):
+        st.markdown("""
+**매수신호 / 매도신호** 숫자는 아래 3가지 조건 중 몇 개가 해당되는지를 나타냅니다.
+
+| 조건 | 매수 신호 | 매도 신호 |
+|---|---|---|
+| RSI(14) | **< 30** 과매도 → 반등 가능성 | **> 70** 과매수 → 조정 가능성 |
+| SMA50 (50일 이평선) | 현재가 **위** → 단기 상승 추세 | 현재가 **아래** → 단기 하락 추세 |
+| SMA200 (200일 이평선) | 현재가 **위** → 장기 상승 추세 | 현재가 **아래** → 장기 하락 추세 |
+
+- **매수신호 2~3** = 초록 배경 → 매수 관심 구간
+- **매수신호 1** = 중립
+- **매수신호 0 / 매도신호 2~3** = 빨강 배경 → 경계 구간
+
+> 단독 지표로 매매 결정 금지. 국면(탭1)과 함께 종합 판단하세요.
+        """)
+
+
+def fg_guide() -> None:
+    with st.expander("공포탐욕지수 해석 가이드 (클릭해서 열기)"):
+        st.markdown("""
+**공포탐욕지수(Fear & Greed Index)** 는 CNN이 7가지 시장 지표를 종합해 0~100으로 표현한 **역발상 지표**입니다.
+
+| 점수 | 등급 | 시장 상태 | 역발상 해석 |
+|---|---|---|---|
+| 0 ~ 24 | 극도의 공포 | 투자자 패닉, 과매도 | **매수 기회** 탐색 시기 |
+| 25 ~ 44 | 공포 | 불안 심리 우세 | 분할 매수 고려 |
+| 45 ~ 55 | 중립 | 균형 상태 | 관망 또는 현상 유지 |
+| 56 ~ 74 | 탐욕 | 낙관 심리 우세 | 일부 차익실현 고려 |
+| 75 ~ 100 | 극도의 탐욕 | 시장 과열, 과매수 | **매도/비중 축소** 시기 |
+
+> **핵심 원칙**: "남들이 탐욕스러울 때 두려워하고, 남들이 두려워할 때 탐욕스러워져라" — 워런 버핏
+> 즉, 지수가 **낮을수록(공포) 매수 기회**, **높을수록(탐욕) 매도 신호**로 해석합니다.
+        """)
 
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -381,7 +430,7 @@ def tab_overview() -> str | None:
     sp   = fetch_sp500_ma()
 
     if not fg or not mac or not sp:
-        st.error("핵심 데이터를 로드할 수 없습니다. 잠시 후 다시 시도하세요.")
+        st.error("핵심 데이터를 로드할 수 없습니다. 잠시 후 새로고침하세요.")
         return None
 
     phase = determine_phase(
@@ -397,16 +446,24 @@ def tab_overview() -> str | None:
     fg_rating_kr = FG_RATING_KR.get(fg["rating"], fg["rating"])
     c1.metric("공포탐욕지수", f"{fg['score']}", fg_rating_kr)
     vix = mac.get("vix", 0)
-    c2.metric("VIX", f"{vix:.1f}", "위험" if vix > 30 else ("주의" if vix > 20 else "안정"), delta_color="inverse")
+    c2.metric("VIX", f"{vix:.1f}",
+              "위험" if vix > 30 else ("주의" if vix > 20 else "안정"),
+              delta_color="inverse")
     spread = mac.get("yield_spread", 0)
-    c3.metric("금리차 10Y-2Y", f"{spread:.2f}%", "역전" if spread < 0 else "정상", delta_color="inverse" if spread < 0 else "normal")
+    c3.metric("금리차 10Y-2Y", f"{spread:.2f}%",
+              "역전 (경기침체 경고)" if spread < 0 else "정상",
+              delta_color="inverse" if spread < 0 else "normal")
     c4.metric("DXY 달러지수", f"{mac.get('dxy', 0):.2f}")
     gap = sp.get("gap_pct", 0)
-    c5.metric("S&P500 vs 200MA", f"{gap:+.2f}%", "위" if gap > 0 else "아래", delta_color="normal" if gap > 0 else "inverse")
+    c5.metric("S&P500 vs 200MA",
+              f"{gap:+.2f}%",
+              "200일선 위 (강세)" if gap > 0 else "200일선 아래 (약세)",
+              delta_color="normal" if gap > 0 else "inverse")
 
+    fg_guide()
     st.divider()
 
-    # Fear & Greed gauge
+    # Gauge + history
     col_gauge, col_history = st.columns([1, 1])
     with col_gauge:
         st.markdown("##### 공포탐욕지수 게이지")
@@ -434,8 +491,7 @@ def tab_overview() -> str | None:
             },
         ))
         fig.update_layout(
-            template="plotly_dark",
-            height=260,
+            template="plotly_dark", height=260,
             margin=dict(t=40, b=0, l=20, r=20),
             paper_bgcolor="rgba(0,0,0,0)",
         )
@@ -443,21 +499,17 @@ def tab_overview() -> str | None:
 
     with col_history:
         st.markdown("##### 기간별 비교")
-        h_data = {
+        h_df = pd.DataFrame({
             "기간": ["현재", "1주 전", "1개월 전", "1년 전"],
             "점수": [fg["score"], fg["prev_1w"], fg["prev_1m"], fg["prev_1y"]],
-        }
-        h_df = pd.DataFrame(h_data)
+        })
         fig2 = go.Figure(go.Bar(
-            x=h_df["기간"],
-            y=h_df["점수"],
+            x=h_df["기간"], y=h_df["점수"],
             marker_color=["#00D4FF", "#5588aa", "#336688", "#224455"],
-            text=h_df["점수"],
-            textposition="outside",
+            text=h_df["점수"], textposition="outside",
         ))
         fig2.update_layout(
-            template="plotly_dark",
-            height=260,
+            template="plotly_dark", height=260,
             margin=dict(t=40, b=0, l=20, r=20),
             yaxis=dict(range=[0, 100]),
             paper_bgcolor="rgba(0,0,0,0)",
@@ -474,8 +526,7 @@ def tab_overview() -> str | None:
                 rating_kr = FG_RATING_KR.get(ind["rating"], ind["rating"])
                 rows.append({"지표": name, "점수": ind["score"], "등급": rating_kr})
         if rows:
-            sub_df = pd.DataFrame(rows)
-            st.dataframe(sub_df, use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     return phase
 
@@ -497,8 +548,7 @@ def tab_us(phase: str | None) -> None:
                 return ["", "", ""]
             st.dataframe(
                 idx_df.style.apply(color_row, axis=1),
-                use_container_width=True,
-                hide_index=True,
+                use_container_width=True, hide_index=True,
             )
         else:
             st.info("지수 데이터를 불러오는 중입니다...")
@@ -507,56 +557,40 @@ def tab_us(phase: str | None) -> None:
         st.markdown("##### 섹터 ETF 1일 등락률")
         sec_df = fetch_sector_performance()
         if not sec_df.empty:
-            bar_colors = ["#00C851" if v > 0 else "#FF3547" for v in sec_df["1일(%)"]]
             fig = go.Figure(go.Bar(
                 x=sec_df["ETF"],
                 y=sec_df["1일(%)"],
-                marker_color=bar_colors,
+                marker_color=["#00C851" if v > 0 else "#FF3547" for v in sec_df["1일(%)"]],
                 text=[f"{v:+.2f}%" for v in sec_df["1일(%)"]],
                 textposition="outside",
-                hovertext=sec_df["섹터"],
+                customdata=sec_df["섹터"],
+                hovertemplate="%{customdata}<br>%{text}<extra></extra>",
             ))
             fig.update_layout(
-                template="plotly_dark",
-                height=300,
+                template="plotly_dark", height=300,
                 margin=dict(t=20, b=0, l=0, r=0),
-                yaxis_title="등락률(%)",
                 paper_bgcolor="rgba(0,0,0,0)",
             )
             st.plotly_chart(fig, use_container_width=True)
 
-    # Sector 1-month comparison
+    # Sector table with names
     if not sec_df.empty:
-        st.markdown("##### 섹터 1개월 성과")
-        fig2 = go.Figure(go.Bar(
-            x=sec_df["ETF"],
-            y=sec_df["1개월(%)"],
-            marker_color=["#00C851" if v > 0 else "#FF3547" for v in sec_df["1개월(%)"]],
-            text=[f"{v:+.2f}%" for v in sec_df["1개월(%)"]],
-            textposition="outside",
-        ))
-        fig2.update_layout(
-            template="plotly_dark",
-            height=280,
-            margin=dict(t=20, b=0, l=0, r=0),
-            paper_bgcolor="rgba(0,0,0,0)",
-        )
-        st.plotly_chart(fig2, use_container_width=True)
+        st.markdown("##### 섹터 성과 상세")
+        st.dataframe(sec_df, use_container_width=True, hide_index=True)
 
     st.divider()
     st.markdown("##### 워치리스트 + 섹터 ETF 기술분석 신호")
-    st.caption("초록 배경: 매수신호 ≥2 | 빨강 배경: 매도신호 ≥2")
+    signal_legend()
 
     with st.spinner("RSI·SMA 계산 중..."):
         all_tickers = tuple(WATCHLIST + list(SECTOR_ETFS.keys()))
         tech_df = fetch_technical_signals(all_tickers)
 
     if not tech_df.empty:
-        display = tech_df[["티커", "현재가", "RSI(14)", "SMA50", "SMA200", "신호", "매수신호", "매도신호"]].copy()
+        display_cols = ["티커", "종목명", "현재가", "RSI(14)", "매수신호", "매도신호", "신호 내역"]
         st.dataframe(
-            display.style.apply(highlight_signals, axis=1),
-            use_container_width=True,
-            hide_index=True,
+            tech_df[display_cols].style.apply(highlight_signals, axis=1),
+            use_container_width=True, hide_index=True,
         )
     else:
         st.info("기술분석 데이터를 불러오는 중입니다...")
@@ -583,59 +617,66 @@ def tab_korea() -> tuple[pd.DataFrame, pd.DataFrame]:
     top10 = fetch_kospi_top10()
     kr_tech = pd.DataFrame()
 
-    if not top10.empty:
-        st.dataframe(top10, use_container_width=True, hide_index=True)
+    if top10.empty:
+        st.warning("종목 데이터를 불러올 수 없습니다.")
+        return pd.DataFrame(), pd.DataFrame()
 
-        codes = tuple(top10["코드"].tolist()) if "코드" in top10.columns else ()
-        if codes:
-            yf_tickers = tuple(f"{c}.KS" for c in codes)
-            st.markdown("##### 기술분석 신호 (시총 TOP10)")
-            with st.spinner("기술지표 계산 중..."):
-                kr_tech = fetch_technical_signals(yf_tickers)
-            if not kr_tech.empty:
-                kr_display = kr_tech[["티커", "현재가", "RSI(14)", "SMA50", "SMA200", "신호", "매수신호", "매도신호"]].copy()
-                st.dataframe(
-                    kr_display.style.apply(highlight_signals, axis=1),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+    st.dataframe(top10, use_container_width=True, hide_index=True)
 
-            st.markdown("##### 외국인/기관 순매매 (최근 5일 합계)")
-            flow_rows = []
-            for _, row in top10.iterrows():
-                code = row.get("코드", "")
-                if not code:
-                    continue
-                flow = fetch_investor_flow(str(code))
-                if flow is not None and not flow.empty:
-                    fgn = int(flow["외국인순매매량"].sum()) if "외국인순매매량" in flow.columns else 0
-                    ins = int(flow["기관순매매량"].sum())   if "기관순매매량"   in flow.columns else 0
-                    flow_rows.append({
-                        "종목": row.get("종목명", code),
-                        "코드": code,
-                        "외국인(5일)": fgn,
-                        "기관(5일)":   ins,
-                    })
+    codes = top10["코드"].tolist()
+    yf_tickers = tuple(f"{c}.KS" for c in codes)
 
-            if flow_rows:
-                flow_df = pd.DataFrame(flow_rows)
+    st.markdown("##### 기술분석 신호 (시총 TOP10)")
+    signal_legend()
+    with st.spinner("한국 종목 기술지표 계산 중... (약 30초 소요)"):
+        kr_tech = fetch_technical_signals(yf_tickers)
 
-                def color_flow(row: pd.Series) -> list[str]:
-                    styles = [""] * len(row)
-                    for i, col in enumerate(row.index):
-                        if col in ("외국인(5일)", "기관(5일)"):
-                            styles[i] = "color:#00C851" if row[col] > 0 else "color:#FF3547"
-                    return styles
-
-                st.dataframe(
-                    flow_df.style.apply(color_flow, axis=1),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-            else:
-                st.info("외국인/기관 순매매 데이터를 일시적으로 불러올 수 없습니다 (Naver Finance 의존).")
+    if not kr_tech.empty:
+        # 종목명 보강 (top10에서 가져오기)
+        code_to_name = dict(zip(top10["코드"], top10["종목명"]))
+        kr_tech["종목명"] = kr_tech["티커"].map(code_to_name).fillna(kr_tech["종목명"])
+        display_cols = ["티커", "종목명", "현재가", "RSI(14)", "매수신호", "매도신호", "신호 내역"]
+        st.dataframe(
+            kr_tech[display_cols].style.apply(highlight_signals, axis=1),
+            use_container_width=True, hide_index=True,
+        )
     else:
-        st.info("KOSPI 종목 데이터를 불러오는 중입니다...")
+        st.warning("yfinance에서 한국 종목 데이터를 가져오지 못했습니다.")
+
+    st.markdown("##### 외국인/기관 순매매 (최근 5일 합계)")
+    st.caption("외국인·기관이 5일간 얼마나 사고 팔았는지 합계. 양수(+) = 순매수, 음수(-) = 순매도")
+    flow_rows = []
+    for _, row in top10.iterrows():
+        code = str(row.get("코드", ""))
+        if not code:
+            continue
+        flow = fetch_investor_flow(code)
+        if flow is not None and not flow.empty:
+            fgn = int(flow["외국인순매매량"].sum()) if "외국인순매매량" in flow.columns else 0
+            ins = int(flow["기관순매매량"].sum())   if "기관순매매량"   in flow.columns else 0
+            flow_rows.append({
+                "종목": row.get("종목명", code),
+                "코드": code,
+                "외국인(5일)": fgn,
+                "기관(5일)":   ins,
+            })
+
+    if flow_rows:
+        flow_df = pd.DataFrame(flow_rows)
+
+        def color_flow(row: pd.Series) -> list[str]:
+            styles = [""] * len(row)
+            for i, col_name in enumerate(row.index):
+                if col_name in ("외국인(5일)", "기관(5일)"):
+                    styles[i] = "color:#00C851" if row[col_name] > 0 else "color:#FF3547"
+            return styles
+
+        st.dataframe(
+            flow_df.style.apply(color_flow, axis=1),
+            use_container_width=True, hide_index=True,
+        )
+    else:
+        st.info("외국인/기관 순매매 데이터를 현재 불러올 수 없습니다 (Naver Finance 접근 제한).")
 
     return top10, kr_tech
 
@@ -656,7 +697,8 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
         unsafe_allow_html=True,
     )
 
-    # US recommendations
+    signal_legend()
+
     st.markdown("#### 미국 추천")
     all_tickers = tuple(WATCHLIST + list(SECTOR_ETFS.keys()))
     with st.spinner("분석 중..."):
@@ -665,16 +707,15 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
     if not us_tech.empty:
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**매수 추천** (매수신호 ≥ 2)")
-            buy_us = us_tech[us_tech["매수신호"] >= 2][["티커", "RSI(14)", "신호"]].copy()
+            st.markdown("**매수 관심** (매수신호 ≥ 2)")
+            buy_us = us_tech[us_tech["매수신호"] >= 2][["티커", "종목명", "RSI(14)", "신호 내역"]].copy()
             if not buy_us.empty:
                 st.dataframe(buy_us, use_container_width=True, hide_index=True)
             else:
                 st.info("현재 매수신호 ≥2 종목 없음")
-
         with col2:
             st.markdown("**매도/경계** (매도신호 ≥ 2)")
-            sell_us = us_tech[us_tech["매도신호"] >= 2][["티커", "RSI(14)", "신호"]].copy()
+            sell_us = us_tech[us_tech["매도신호"] >= 2][["티커", "종목명", "RSI(14)", "신호 내역"]].copy()
             if not sell_us.empty:
                 st.dataframe(sell_us, use_container_width=True, hide_index=True)
             else:
@@ -682,12 +723,11 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
 
     st.divider()
 
-    # Korean recommendations
     st.markdown("#### 한국 추천")
     if not top10.empty and not kr_tech.empty:
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**한국 매수 추천** (외국인 순매수 + 기술매수신호 ≥2)")
+            st.markdown("**한국 매수 관심** (외국인 순매수 + 기술매수신호 ≥2)")
             buy_kr_rows = []
             for _, row in top10.iterrows():
                 code = str(row.get("코드", ""))
@@ -698,12 +738,12 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
                     foreign_buy = flow["외국인순매매량"].sum() > 0
                 if not foreign_buy:
                     continue
-                match = kr_tech[kr_tech["티커"] == yf_ticker]
+                match = kr_tech[kr_tech["티커"] == code]
                 if not match.empty and match.iloc[0]["매수신호"] >= 2:
                     buy_kr_rows.append({
                         "종목": row.get("종목명", code),
                         "외국인": "순매수",
-                        "기술신호": match.iloc[0]["신호"],
+                        "신호 내역": match.iloc[0]["신호 내역"],
                     })
             if buy_kr_rows:
                 st.dataframe(pd.DataFrame(buy_kr_rows), use_container_width=True, hide_index=True)
@@ -711,33 +751,30 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
                 st.info("교차 조건(외국인 순매수 + 기술매수 ≥2) 충족 종목 없음")
 
         with col2:
-            st.markdown("**한국 매도/경계** (기술매도신호 ≥2)")
-            if not kr_tech.empty:
-                sell_kr = kr_tech[kr_tech["매도신호"] >= 2][["티커", "RSI(14)", "신호"]].copy()
-                if not sell_kr.empty:
-                    st.dataframe(sell_kr, use_container_width=True, hide_index=True)
-                else:
-                    st.info("현재 기술매도신호 ≥2 한국 종목 없음")
+            st.markdown("**한국 경계** (기술매도신호 ≥2)")
+            sell_kr = kr_tech[kr_tech["매도신호"] >= 2][["티커", "종목명", "RSI(14)", "신호 내역"]].copy()
+            if not sell_kr.empty:
+                st.dataframe(sell_kr, use_container_width=True, hide_index=True)
+            else:
+                st.info("현재 기술매도신호 ≥2 한국 종목 없음")
     else:
         st.info("한국장 탭을 먼저 로드해주세요.")
 
     st.divider()
 
-    # Sector rotation
     st.markdown("#### 섹터 로테이션 제안")
+    st.caption("현재 국면에서 역사적으로 유리/불리한 섹터 방향입니다.")
     rotation = PHASE_SECTORS.get(phase, {})
     c1, c2 = st.columns(2)
     with c1:
         buy_list = rotation.get("buy", [])
-        buy_names = [SECTOR_ETFS.get(t, t) for t in buy_list]
-        st.success(f"**비중 확대 권장**\n\n" + "\n".join(
-            f"- {t} ({n})" for t, n in zip(buy_list, buy_names)
+        st.success("**비중 확대 권장**\n\n" + "\n".join(
+            f"- **{t}** ({SECTOR_ETFS.get(t, t)})" for t in buy_list
         ))
     with c2:
         sell_list = rotation.get("sell", [])
-        sell_names = [SECTOR_ETFS.get(t, t) for t in sell_list]
-        st.error(f"**비중 축소 권장**\n\n" + "\n".join(
-            f"- {t} ({n})" for t, n in zip(sell_list, sell_names)
+        st.error("**비중 축소 권장**\n\n" + "\n".join(
+            f"- **{t}** ({SECTOR_ETFS.get(t, t)})" for t in sell_list
         ))
 
     st.caption(
