@@ -1062,7 +1062,7 @@ def tab_us(phase: str | None) -> None:
         )
 
 
-def tab_korea() -> tuple[pd.DataFrame, pd.DataFrame]:
+def tab_korea() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     st.subheader("한국 시장")
 
     kr_idx = fetch_korean_indices()
@@ -1082,10 +1082,11 @@ def tab_korea() -> tuple[pd.DataFrame, pd.DataFrame]:
     st.markdown("##### KOSPI 시가총액 상위 10")
     top10 = fetch_kospi_top10()
     kr_tech = pd.DataFrame()
+    kr_extra_df = pd.DataFrame()
 
     if top10.empty:
         st.warning("종목 데이터를 불러올 수 없습니다.")
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     st.dataframe(top10, use_container_width=True, hide_index=True)
 
@@ -1225,10 +1226,10 @@ def tab_korea() -> tuple[pd.DataFrame, pd.DataFrame]:
     else:
         st.info("외국인/기관 순매매 데이터를 현재 불러올 수 없습니다 (Naver Finance 접근 제한).")
 
-    return top10, kr_tech
+    return top10, kr_tech, kr_extra_df
 
 
-def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.DataFrame) -> None:
+def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.DataFrame, kr_extra: pd.DataFrame | None = None) -> None:
     st.subheader("매수/매도 추천")
 
     if not phase:
@@ -1286,42 +1287,74 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
 
     st.divider()
 
-    st.markdown("#### 한국 추천")
-    if not top10.empty and not kr_tech.empty:
+    st.markdown("#### 한국 추천 요약")
+
+    # ── 시총TOP10 + Claude추천 통합 ───────────────────────────────────────────
+    combined_parts = []
+    if not kr_tech.empty:
+        tmp = kr_tech.copy()
+        tmp["출처"] = "시총TOP10"
+        tmp["섹터"] = ""
+        combined_parts.append(tmp)
+    if kr_extra is not None and not kr_extra.empty:
+        tmp = kr_extra.copy()
+        tmp["출처"] = "Claude추천"
+        if "섹터" not in tmp.columns:
+            tmp["섹터"] = ""
+        combined_parts.append(tmp)
+
+    if not combined_parts:
+        st.info("한국장 탭을 먼저 로드해주세요.")
+    else:
+        all_kr = pd.concat(combined_parts, ignore_index=True)
+
+        # ── 외국인 순매매 방향 (참고 컬럼) ──────────────────────────────────
+        flow_sign: dict[str, str] = {}
+        for code in all_kr["티커"].tolist():
+            flow = fetch_investor_flow(str(code))
+            if flow is not None and "외국인순매매량" in flow.columns:
+                s = flow["외국인순매매량"].sum()
+                flow_sign[code] = "▲순매수" if s > 0 else "▼순매도"
+        all_kr["외국인(5일)"] = all_kr["티커"].map(flow_sign).fillna("정보없음")
+
+        rec_cols = [
+            "출처", "섹터", "종목명",
+            "RSI(14)", "RSI해석", "RSI다이버전스", "신규진입", "보유판단",
+            "외국인(5일)", "1개월(%)", "3개월(%)", "신호 내역",
+        ]
+        rec_cols = [c for c in rec_cols if c in all_kr.columns]
+        rec_fmt = {k: v for k, v in TECH_COL_FMT.items() if k in rec_cols}
+
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**한국 매수 관심** (외국인 순매수 + 기술매수신호 ≥3)")
-            buy_kr_rows = []
-            for _, row in top10.iterrows():
-                code = str(row.get("코드", ""))
-                yf_ticker = f"{code}.KS"
-                flow = fetch_investor_flow(code)
-                foreign_buy = False
-                if flow is not None and "외국인순매매량" in flow.columns:
-                    foreign_buy = flow["외국인순매매량"].sum() > 0
-                if not foreign_buy:
-                    continue
-                match = kr_tech[kr_tech["티커"] == code]
-                if not match.empty and match.iloc[0]["매수신호"] >= 3:
-                    buy_kr_rows.append({
-                        "종목": row.get("종목명", code),
-                        "외국인": "순매수",
-                        "신호 내역": match.iloc[0]["신호 내역"],
-                    })
-            if buy_kr_rows:
-                st.dataframe(pd.DataFrame(buy_kr_rows), use_container_width=True, hide_index=True)
+            st.markdown("**매수 관심** (기술매수신호 ≥ 3) — 외국인 방향 참고")
+            buy_kr = (
+                all_kr[all_kr["매수신호"] >= 3][rec_cols]
+                .sort_values("3개월(%)", ascending=False)
+                .copy()
+            ) if "매수신호" in all_kr.columns else pd.DataFrame()
+            if not buy_kr.empty:
+                st.dataframe(
+                    buy_kr.style.apply(highlight_signals, axis=1).format(rec_fmt, na_rep="-"),
+                    use_container_width=True, hide_index=True,
+                )
             else:
-                st.info("교차 조건(외국인 순매수 + 기술매수 ≥2) 충족 종목 없음")
+                st.info("현재 기술매수신호 ≥3 종목 없음")
 
         with col2:
-            st.markdown("**한국 경계** (기술매도신호 ≥3)")
-            sell_kr = kr_tech[kr_tech["매도신호"] >= 3][["티커", "종목명", "RSI(14)", "신호 내역"]].copy()
+            st.markdown("**경계/매도** (기술매도신호 ≥ 3)")
+            sell_kr = (
+                all_kr[all_kr["매도신호"] >= 3][rec_cols]
+                .sort_values("3개월(%)", ascending=True)
+                .copy()
+            ) if "매도신호" in all_kr.columns else pd.DataFrame()
             if not sell_kr.empty:
-                st.dataframe(sell_kr, use_container_width=True, hide_index=True)
+                st.dataframe(
+                    sell_kr.style.apply(highlight_signals, axis=1).format(rec_fmt, na_rep="-"),
+                    use_container_width=True, hide_index=True,
+                )
             else:
-                st.info("현재 기술매도신호 ≥2 한국 종목 없음")
-    else:
-        st.info("한국장 탭을 먼저 로드해주세요.")
+                st.info("현재 기술매도신호 ≥3 종목 없음")
 
     st.divider()
 
@@ -1432,6 +1465,7 @@ Claude Code에서 요청:
     phase: str | None = None
     top10 = pd.DataFrame()
     kr_tech = pd.DataFrame()
+    kr_extra = pd.DataFrame()
 
     with tab1:
         phase = tab_overview()
@@ -1440,10 +1474,10 @@ Claude Code에서 요청:
         tab_us(phase)
 
     with tab3:
-        top10, kr_tech = tab_korea()
+        top10, kr_tech, kr_extra = tab_korea()
 
     with tab4:
-        tab_recommendations(phase, top10, kr_tech)
+        tab_recommendations(phase, top10, kr_tech, kr_extra)
 
 
 if __name__ == "__main__":
