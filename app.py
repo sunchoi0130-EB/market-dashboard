@@ -646,8 +646,8 @@ def tab_us(phase: str | None) -> None:
 
     # Sector table with names
     if not sec_df.empty:
-        st.markdown("##### 섹터 성과 상세")
-        st.dataframe(sec_df, use_container_width=True, hide_index=True)
+        with st.expander("섹터 성과 상세 (클릭해서 열기)"):
+            st.dataframe(sec_df, use_container_width=True, hide_index=True)
 
     st.divider()
     st.markdown("##### 워치리스트 + 섹터 ETF 기술분석 신호")
