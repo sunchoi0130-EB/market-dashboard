@@ -1051,6 +1051,7 @@ def tab_korea() -> tuple[pd.DataFrame, pd.DataFrame]:
         ]
         display_cols = [c for c in display_cols if c in kr_tech.columns]
         fmt = {k: v for k, v in TECH_COL_FMT.items() if k in display_cols}
+        fmt["현재가"] = "{:,.0f}"  # 원화 — 정수 + 천단위 콤마
         st.dataframe(
             kr_tech[display_cols]
             .style.apply(highlight_signals, axis=1)
