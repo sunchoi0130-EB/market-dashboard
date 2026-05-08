@@ -805,6 +805,82 @@ def position_guidance(row: pd.Series) -> tuple[str, str]:
     return entry, hold
 
 
+@st.cache_data(ttl=3600)
+def resolve_ticker(query: str) -> list[tuple[str, str, bool]]:
+    """
+    종목 코드·티커·회사명 모두 수용 → [(raw_code, display_name, is_korean), ...] 반환.
+    raw_code: 한국 6자리 코드 or 미국 티커 심볼 (compute_checkup에 그대로 전달 가능).
+    """
+    q = query.strip()
+    results: list[tuple[str, str, bool]] = []
+
+    # ── Case 1: 6자리 숫자 → 한국 코드 직접 사용 ─────────────────────────────
+    if q.isdigit() and len(q) == 6:
+        name = KR_CLAUDE_PICK_NAMES.get(q, q)
+        return [(q, f"{name} ({q})", True)]
+
+    # ── Case 2: 한국어 포함 → KOSPI / KOSDAQ 이름 검색 ──────────────────────
+    has_korean = any("가" <= c <= "힣" for c in q)
+    if has_korean:
+        try:
+            for market in ["KOSPI", "KOSDAQ"]:
+                listing = fdr.StockListing(market)
+                listing.columns = [c.strip() for c in listing.columns]
+                name_col = next((c for c in listing.columns if c in ("Name", "name", "종목명")), None)
+                code_col = next((c for c in listing.columns if c in ("Code", "Symbol", "code")), None)
+                if not name_col or not code_col:
+                    continue
+                hits = listing[
+                    listing[name_col].str.contains(q, na=False) &
+                    ~listing[code_col].astype(str).str.endswith("5") &
+                    ~listing[name_col].astype(str).str.endswith(("우", "우B", "우C"))
+                ]
+                for _, row in hits.head(6).iterrows():
+                    code = str(row[code_col])
+                    name = str(row[name_col])
+                    results.append((code, f"{name} ({code}) [{market}]", True))
+        except Exception:
+            pass
+        return results[:10]
+
+    # ── Case 3: 영문 티커처럼 보이면 직접 우선 추가 ──────────────────────────
+    q_up = q.upper()
+    if q.replace("-", "").replace(".", "").isalpha() and len(q) <= 6:
+        results.append((q_up, q_up, False))
+
+    # ── Case 4: yf.Search로 이름 검색 ────────────────────────────────────────
+    try:
+        search = yf.Search(q, max_results=10)
+        US_EXCHANGES = {"NMS", "NYQ", "NGM", "PCX", "ASE", "BTS"}
+        for item in search.quotes:
+            sym  = item.get("symbol", "")
+            name = item.get("longname") or item.get("shortname", sym)
+            exch = item.get("exchange", "")
+            if item.get("quoteType") != "EQUITY" or not sym:
+                continue
+            is_kr = sym.endswith(".KS") or sym.endswith(".KQ")
+            raw   = sym.replace(".KS", "").replace(".KQ", "") if is_kr else sym
+            label = f"{name} ({sym}) [{exch}]"
+            entry = (raw, label, is_kr)
+            if entry not in results:
+                # 미국 거래소 우선 삽입, 나머지는 뒤에
+                if exch in US_EXCHANGES:
+                    results.insert(0, entry) if not results else results.append(entry)
+                else:
+                    results.append(entry)
+    except Exception:
+        pass
+
+    # 중복 제거 (raw_code 기준)
+    seen: set[str] = set()
+    deduped = []
+    for r in results:
+        if r[0] not in seen:
+            seen.add(r[0])
+            deduped.append(r)
+    return deduped[:10]
+
+
 @st.cache_data(ttl=300)
 def compute_checkup(ticker_input: str, phase: str) -> dict | None:
     """단일 종목 종합 검진 — ADX·거래량·OBV·ATR·52주 신호 + Phase 가중치 적용."""
@@ -1038,20 +1114,43 @@ def tab_checkup(phase: str | None) -> None:
     with col_inp:
         ticker_raw = st.text_input(
             "ticker",
-            placeholder="미국: AAPL · NVDA · TSLA    한국: 005380 · 005930 · 000660",
+            placeholder="종목명·티커·코드 모두 가능: 삼성전자 / 현대차 / Apple / AAPL / 005930",
             label_visibility="collapsed",
         )
     with col_btn:
         run = st.button("검진 시작", use_container_width=True)
 
-    st.caption("한국 종목은 6자리 숫자 코드 입력 (예: 005930 = 삼성전자, 005380 = 현대차)")
+    st.caption("한국 종목명(한글) · 미국 회사명(영문) · 티커(AAPL) · 한국 코드(005930) 모두 입력 가능")
 
-    if not run or not ticker_raw.strip():
-        st.info("종목 코드를 입력 후 [검진 시작] 버튼을 누르세요.")
+    if not ticker_raw.strip():
+        st.info("종목명이나 코드를 입력 후 [검진 시작] 버튼을 누르세요.")
         return
 
-    ticker_input = ticker_raw.strip()
-    with st.spinner(f"{ticker_input} 분석 중..."):
+    # ── 종목 검색 및 선택 ─────────────────────────────────────────────────────
+    with st.spinner("종목 검색 중..."):
+        candidates = resolve_ticker(ticker_raw.strip())
+
+    if not candidates:
+        st.error(f"**{ticker_raw}** 에 해당하는 종목을 찾을 수 없습니다. 티커 코드로 직접 입력해보세요.")
+        return
+
+    if len(candidates) == 1:
+        ticker_input, display_name, _ = candidates[0]
+        st.caption(f"검색됨: **{display_name}**")
+    else:
+        labels = [c[1] for c in candidates]
+        idx = st.selectbox(
+            f"**{len(candidates)}개** 종목이 검색됐습니다. 분석할 종목을 선택하세요:",
+            range(len(labels)),
+            format_func=lambda i: labels[i],
+        )
+        ticker_input, display_name, _ = candidates[idx]
+
+    if not run:
+        st.info(f"**{display_name}** 을(를) 분석합니다. [검진 시작] 버튼을 누르세요.")
+        return
+
+    with st.spinner(f"{display_name} 분석 중..."):
         r = compute_checkup(ticker_input, effective_phase)
 
     if r is None:
