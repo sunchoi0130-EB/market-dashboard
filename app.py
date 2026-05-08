@@ -443,6 +443,9 @@ def fetch_kospi_top10() -> pd.DataFrame:
         cap_col  = next((c for c in listing.columns if c in ("Marcap", "MarCap", "시가총액")), None)
 
         if code_col and name_col:
+            # 우선주 제외: 코드 끝자리가 5이거나 종목명에 '우' '우B' 포함
+            listing = listing[~listing[code_col].astype(str).str.endswith("5")]
+            listing = listing[~listing[name_col].astype(str).str.endswith(("우", "우B", "우C"))]
             top10 = listing.head(10)[[code_col, name_col]].copy()
             top10 = top10.rename(columns={code_col: "코드", name_col: "종목명"})
             if cap_col:
@@ -691,8 +694,6 @@ def signal_legend() -> None:
 |---|---|
 | RSI해석 | RSI 현재 구간 + 5일 방향을 결합한 맥락 해석 (아래 표 참고) |
 | RSI다이버전스 | 가격 방향과 RSI 방향이 엇갈릴 때 추세 전환 선행 신호 (아래 표 참고) |
-| 주봉RSI | 주봉 기준 RSI. 일봉 RSI < 30 이면서 주봉 RSI도 < 40 이면 **장기 과매도** (강한 매수 후보) |
-| RS vs S&P(3M) | +10 = S&P500보다 3개월간 10%p 더 올랐음 / -5 = 5%p 덜 올랐음 |
 | 신규진입 | 지금 처음 매수하는 경우의 타이밍 판단 (아래 표 참고) |
 | 보유판단 | 이미 보유 중인 경우의 매도/유지 판단 (아래 표 참고) |
 
@@ -951,14 +952,11 @@ def tab_us(phase: str | None) -> None:
             f"{ts_label} | S&P500 — 1개월: {sp_ret['1m']:+.1f}%  "
             f"3개월: {sp_ret['3m']:+.1f}%  12개월: {sp_ret['12m']:+.1f}%"
         )
-        st.caption("RS vs S&P(3M): +10 = S&P500보다 3개월간 10%p 초과 성과 / -5 = 5%p 하회")
-
         display_cols = [
             "티커", "종목명", "현재가",
-            "RSI(14)", "RSI해석", "RSI다이버전스", "주봉RSI",
-            "1개월(%)", "3개월(%)", "RS vs S&P(3M)",
+            "RSI(14)", "RSI해석", "RSI다이버전스", "신규진입", "보유판단",
+            "1개월(%)", "3개월(%)",
             "매수신호", "매도신호", "신호 내역",
-            "신규진입", "보유판단",
         ]
         display_cols = [c for c in display_cols if c in tech_df.columns]
         fmt = {k: v for k, v in TECH_COL_FMT.items() if k in display_cols}
@@ -1044,10 +1042,9 @@ def tab_korea() -> tuple[pd.DataFrame, pd.DataFrame]:
 
         display_cols = [
             "티커", "종목명", "현재가",
-            "RSI(14)", "RSI해석", "RSI다이버전스", "주봉RSI",
-            "1개월(%)", "3개월(%)", "RS vs S&P(3M)",
+            "RSI(14)", "RSI해석", "RSI다이버전스", "신규진입", "보유판단",
+            "1개월(%)", "3개월(%)",
             "매수신호", "매도신호", "신호 내역",
-            "신규진입", "보유판단",
         ]
         display_cols = [c for c in display_cols if c in kr_tech.columns]
         fmt = {k: v for k, v in TECH_COL_FMT.items() if k in display_cols}
@@ -1128,15 +1125,15 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
         us_tech[["신규진입", "보유판단"]] = us_tech.apply(
             lambda r: pd.Series(position_guidance(r)), axis=1
         )
-        rec_cols = ["티커", "종목명", "RSI(14)", "3개월(%)", "RS vs S&P(3M)", "신규진입", "보유판단", "신호 내역"]
+        rec_cols = ["티커", "종목명", "RSI(14)", "3개월(%)", "신규진입", "보유판단", "신호 내역"]
         rec_cols = [c for c in rec_cols if c in us_tech.columns]
 
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**매수 관심** (매수신호 ≥ 3) — RS 강도순 정렬")
+            st.markdown("**매수 관심** (매수신호 ≥ 3) — 3개월 수익률순")
             buy_us = (
                 us_tech[us_tech["매수신호"] >= 3][rec_cols]
-                .sort_values("RS vs S&P(3M)", ascending=False)
+                .sort_values("3개월(%)", ascending=False)
                 .copy()
             )
             if not buy_us.empty:
@@ -1144,10 +1141,10 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
             else:
                 st.info("현재 매수신호 ≥3 종목 없음")
         with col2:
-            st.markdown("**매도/경계** (매도신호 ≥ 3) — RS 약세순 정렬")
+            st.markdown("**매도/경계** (매도신호 ≥ 3) — 3개월 수익률 약세순")
             sell_us = (
                 us_tech[us_tech["매도신호"] >= 3][rec_cols]
-                .sort_values("RS vs S&P(3M)", ascending=True)
+                .sort_values("3개월(%)", ascending=True)
                 .copy()
             )
             if not sell_us.empty:
