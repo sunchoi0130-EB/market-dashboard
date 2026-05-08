@@ -163,7 +163,7 @@ def fetch_macro_data() -> dict:
             if ticker in close.columns:
                 result[key] = float(close[ticker].dropna().iloc[-1])
         if "y10" in result and "y2" in result:
-            result["yield_spread"] = round(result["y10"] - result["y2"], 3)
+            result["yield_spread"] = round(result["y10"] - result["y2"], 1)
     except Exception as e:
         st.warning(f"매크로 데이터 로드 실패: {e}")
     return result
@@ -178,7 +178,7 @@ def fetch_sp500_ma() -> dict:
         return {
             "price": price,
             "ma200": ma200,
-            "gap_pct": round((price - ma200) / ma200 * 100, 2),
+            "gap_pct": round((price - ma200) / ma200 * 100, 1),
             "above": price > ma200,
         }
     except Exception:
@@ -193,9 +193,9 @@ def fetch_sp500_returns() -> dict[str, float]:
         c = hist["Close"]
         price = float(c.iloc[-1])
         return {
-            "1m":  round((price / float(c.iloc[-22]) - 1) * 100, 2) if len(c) >= 22 else 0.0,
-            "3m":  round((price / float(c.iloc[-63]) - 1) * 100, 2) if len(c) >= 63 else 0.0,
-            "12m": round((price / float(c.iloc[0])   - 1) * 100, 2),
+            "1m":  round((price / float(c.iloc[-22]) - 1) * 100, 1) if len(c) >= 22 else 0.0,
+            "3m":  round((price / float(c.iloc[-63]) - 1) * 100, 1) if len(c) >= 63 else 0.0,
+            "12m": round((price / float(c.iloc[0])   - 1) * 100, 1),
         }
     except Exception:
         return {"1m": 0.0, "3m": 0.0, "12m": 0.0}
@@ -228,7 +228,7 @@ def fetch_us_indices() -> tuple[pd.DataFrame, str]:
             else:
                 cur = float(daily_close.iloc[-1][t]) if t in daily_close.columns else float("nan")
             chg = (cur - prv) / prv * 100 if prv else float("nan")
-            rows.append({"지수": US_INDICES[t], "현재가": f"{cur:,.2f}", "등락률(%)": round(chg, 2)})
+            rows.append({"지수": US_INDICES[t], "현재가": f"{cur:,.1f}", "등락률(%)": round(chg, 1)})
         return pd.DataFrame(rows), price_ts
     except Exception:
         return pd.DataFrame(), ""
@@ -248,8 +248,8 @@ def fetch_sector_performance() -> pd.DataFrame:
         return pd.DataFrame({
             "ETF":      tickers,
             "섹터":     list(SECTOR_ETFS.values()),
-            "1일(%)":   [round(float(p1d[t]), 2) for t in tickers],
-            "1개월(%)": [round(float(p1m[t]), 2) for t in tickers],
+            "1일(%)":   [round(float(p1d[t]), 1) for t in tickers],
+            "1개월(%)": [round(float(p1m[t]), 1) for t in tickers],
         })
     except Exception:
         return pd.DataFrame()
@@ -327,9 +327,9 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
                 sell_cnt += 1
 
             # 모멘텀 수익률 (이미 받은 hist 활용)
-            ret_1m  = round((price / float(close.iloc[-22]) - 1) * 100, 2) if len(close) >= 22 else float("nan")
-            ret_3m  = round((price / float(close.iloc[-63]) - 1) * 100, 2) if len(close) >= 63 else float("nan")
-            ret_12m = round((price / float(close.iloc[0])   - 1) * 100, 2)
+            ret_1m  = round((price / float(close.iloc[-22]) - 1) * 100, 1) if len(close) >= 22 else float("nan")
+            ret_3m  = round((price / float(close.iloc[-63]) - 1) * 100, 1) if len(close) >= 63 else float("nan")
+            ret_12m = round((price / float(close.iloc[0])   - 1) * 100, 1)
 
             # 종목명 조회 (섹터 ETF 또는 워치리스트)
             base = ticker.replace(".KS", "")
@@ -338,7 +338,7 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
             rows.append({
                 "티커":        ticker.replace(".KS", ""),
                 "종목명":      name,
-                "현재가":      round(price, 2),
+                "현재가":      round(price, 1),
                 "RSI(14)":     round(rsi_val, 1),
                 "RSI해석":      rsi_trend,
                 "1개월(%)":    ret_1m,
@@ -388,7 +388,7 @@ def fetch_realtime_prices(tickers: tuple[str, ...]) -> dict[str, dict]:
             series = close[col].dropna()
             if not series.empty:
                 result[ticker] = {
-                    "price": round(float(series.iloc[-1]), 2),
+                    "price": round(float(series.iloc[-1]), 1),
                     "ts":    ts,
                 }
     except Exception:
@@ -408,8 +408,8 @@ def fetch_korean_indices() -> dict:
             latest = float(df["Close"].iloc[-1])
             prev   = float(df["Close"].iloc[-2])
             result[name] = {
-                "price":      round(latest, 2),
-                "change_pct": round((latest - prev) / prev * 100, 2),
+                "price":      round(latest, 1),
+                "change_pct": round((latest - prev) / prev * 100, 1),
             }
         except Exception:
             result[name] = {"price": 0.0, "change_pct": 0.0}
@@ -511,9 +511,9 @@ def add_relative_strength(tech_df: pd.DataFrame, sp_ret: dict[str, float]) -> pd
     """S&P500 대비 상대강도(RS) 컬럼 추가. RS > 0 = 시장 대비 초과 성과."""
     df = tech_df.copy()
     if "3개월(%)" in df.columns:
-        df["RS vs S&P(3M)"] = (df["3개월(%)"] - sp_ret.get("3m", 0)).round(2)
+        df["RS vs S&P(3M)"] = (df["3개월(%)"] - sp_ret.get("3m", 0)).round(1)
     if "12개월(%)" in df.columns:
-        df["RS vs S&P(12M)"] = (df["12개월(%)"] - sp_ret.get("12m", 0)).round(2)
+        df["RS vs S&P(12M)"] = (df["12개월(%)"] - sp_ret.get("12m", 0)).round(1)
     return df
 
 
@@ -616,13 +616,13 @@ def tab_overview() -> str | None:
               "위험" if vix > 30 else ("주의" if vix > 20 else "안정"),
               delta_color="inverse")
     spread = mac.get("yield_spread", 0)
-    c3.metric("금리차 10Y-2Y", f"{spread:.2f}%",
+    c3.metric("금리차 10Y-2Y", f"{spread:.1f}%",
               "역전 (경기침체 경고)" if spread < 0 else "정상",
               delta_color="inverse" if spread < 0 else "normal")
-    c4.metric("DXY 달러지수", f"{mac.get('dxy', 0):.2f}")
+    c4.metric("DXY 달러지수", f"{mac.get('dxy', 0):.1f}")
     gap = sp.get("gap_pct", 0)
     c5.metric("S&P500 vs 200MA",
-              f"{gap:+.2f}%",
+              f"{gap:+.1f}%",
               "200일선 위 (강세)" if gap > 0 else "200일선 아래 (약세)",
               delta_color="normal" if gap > 0 else "inverse")
 
@@ -731,7 +731,7 @@ def tab_us(phase: str | None) -> None:
                 x=sec_df["ETF"],
                 y=sec_df["1일(%)"],
                 marker_color=["#00C851" if v > 0 else "#FF3547" for v in sec_df["1일(%)"]],
-                text=[f"{v:+.2f}%" for v in sec_df["1일(%)"]],
+                text=[f"{v:+.1f}%" for v in sec_df["1일(%)"]],
                 textposition="outside",
                 customdata=sec_df["섹터"],
                 hovertemplate="%{customdata}<br>%{text}<extra></extra>",
@@ -806,8 +806,8 @@ def tab_korea() -> tuple[pd.DataFrame, pd.DataFrame]:
         chg   = d.get("change_pct", 0)
         col.metric(
             name,
-            f"{price:,.2f}",
-            f"{chg:+.2f}%",
+            f"{price:,.1f}",
+            f"{chg:+.1f}%",
             delta_color="normal" if chg >= 0 else "inverse",
         )
 
