@@ -113,6 +113,18 @@ FG_RATING_KR = {
     "Extreme Greed": "극도의 탐욕",
 }
 
+# 기술분석 테이블 숫자 컬럼 표시 포맷 (소수점 1자리 강제)
+TECH_COL_FMT: dict[str, str] = {
+    "현재가":          "{:.1f}",
+    "RSI(14)":         "{:.1f}",
+    "주봉RSI":         "{:.1f}",
+    "1개월(%)":        "{:.1f}",
+    "3개월(%)":        "{:.1f}",
+    "12개월(%)":       "{:.1f}",
+    "RS vs S&P(3M)":   "{:.1f}",
+    "RS vs S&P(12M)":  "{:.1f}",
+}
+
 # ── Data Fetchers ──────────────────────────────────────────────────────────────
 
 
@@ -331,6 +343,9 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
             ret_3m  = round((price / float(close.iloc[-63]) - 1) * 100, 1) if len(close) >= 63 else float("nan")
             ret_12m = round((price / float(close.iloc[0])   - 1) * 100, 1)
 
+            # RSI 다이버전스
+            divergence = detect_rsi_divergence(close, rsi_series)
+
             # 종목명 조회 (섹터 ETF 또는 워치리스트)
             base = ticker.replace(".KS", "")
             name = TICKER_NAMES.get(base, base)
@@ -341,6 +356,7 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
                 "현재가":      round(price, 1),
                 "RSI(14)":     round(rsi_val, 1),
                 "RSI해석":      rsi_trend,
+                "RSI다이버전스": divergence,
                 "1개월(%)":    ret_1m,
                 "3개월(%)":    ret_3m,
                 "12개월(%)":   ret_12m,
@@ -507,6 +523,52 @@ def rsi_context(rsi: float, delta: float) -> str:
         return f"↑ 바닥 반등 중 ({delta:+.1f})" if up else "바닥 하락 지속"
 
 
+def _swing_lows(vals: list, window: int = 5) -> list[int]:
+    idxs, n = [], len(vals)
+    for i in range(window, n - window):
+        if (all(vals[i] <= vals[i - j] for j in range(1, window + 1)) and
+                all(vals[i] <= vals[i + j] for j in range(1, window + 1))):
+            idxs.append(i)
+    return idxs
+
+
+def _swing_highs(vals: list, window: int = 5) -> list[int]:
+    idxs, n = [], len(vals)
+    for i in range(window, n - window):
+        if (all(vals[i] >= vals[i - j] for j in range(1, window + 1)) and
+                all(vals[i] >= vals[i + j] for j in range(1, window + 1))):
+            idxs.append(i)
+    return idxs
+
+
+def detect_rsi_divergence(close: pd.Series, rsi_series: pd.Series,
+                          lookback: int = 63, window: int = 5) -> str:
+    """
+    RSI 다이버전스 감지 (최근 3개월 기준).
+    강세다이버전스: 가격 저점↓ + RSI 저점↑ → 하락 모멘텀 약화, 반등 가능성
+    약세다이버전스: 가격 고점↑ + RSI 고점↓ → 상승 모멘텀 약화, 조정 가능성
+    RSI 차이 2p 이상 요구해 노이즈 억제.
+    """
+    if len(close) < lookback + window or len(rsi_series) < lookback + window:
+        return "-"
+    p = close.iloc[-lookback:].values.tolist()
+    r = rsi_series.iloc[-lookback:].values.tolist()
+
+    lows = _swing_lows(p, window)
+    if len(lows) >= 2:
+        i1, i2 = lows[-2], lows[-1]
+        if p[i2] < p[i1] and r[i2] > r[i1] + 2:
+            return "🟢 강세"
+
+    highs = _swing_highs(p, window)
+    if len(highs) >= 2:
+        i1, i2 = highs[-2], highs[-1]
+        if p[i2] > p[i1] and r[i2] < r[i1] - 2:
+            return "🔴 약세"
+
+    return "-"
+
+
 def add_relative_strength(tech_df: pd.DataFrame, sp_ret: dict[str, float]) -> pd.DataFrame:
     """S&P500 대비 상대강도(RS) 컬럼 추가. RS > 0 = 시장 대비 초과 성과."""
     df = tech_df.copy()
@@ -549,8 +611,19 @@ def signal_legend() -> None:
 | 컬럼 | 해석 |
 |---|---|
 | RSI해석 | RSI 현재 구간 + 5일 방향을 결합한 맥락 해석 (아래 표 참고) |
+| RSI다이버전스 | 가격 방향과 RSI 방향이 엇갈릴 때 추세 전환 선행 신호 (아래 표 참고) |
 | 주봉RSI | 주봉 기준 RSI. 일봉 RSI < 30 이면서 주봉 RSI도 < 40 이면 **장기 과매도** (강한 매수 후보) |
 | RS vs S&P(3M) | +10 = S&P500보다 3개월간 10%p 더 올랐음 / -5 = 5%p 덜 올랐음 |
+
+**RSI 다이버전스 해석**
+
+| 신호 | 조건 | 의미 |
+|---|---|---|
+| 🟢 강세다이버전스 | 가격: 직전 저점 **아래** → RSI: 직전 저점 **위** | 하락 모멘텀 약화 → 반등 선행 신호 |
+| 🔴 약세다이버전스 | 가격: 직전 고점 **위** → RSI: 직전 고점 **아래** | 상승 모멘텀 약화 → 조정 선행 신호 |
+| - | 다이버전스 없음 | 가격·RSI 방향 일치, 현재 추세 유효 |
+
+> 다이버전스는 **선행 신호**입니다. 발생 이후 즉시 전환되지 않을 수 있으며 반드시 다른 신호와 교차 확인하세요. 최근 3개월(63거래일) 스윙 저점/고점 기준으로 산출합니다.
 
 **RSI해석 구간 기준**
 
@@ -782,13 +855,16 @@ def tab_us(phase: str | None) -> None:
 
         display_cols = [
             "티커", "종목명", "현재가",
-            "RSI(14)", "RSI해석", "주봉RSI",
+            "RSI(14)", "RSI해석", "RSI다이버전스", "주봉RSI",
             "1개월(%)", "3개월(%)", "RS vs S&P(3M)",
             "매수신호", "매도신호", "신호 내역",
         ]
         display_cols = [c for c in display_cols if c in tech_df.columns]
+        fmt = {k: v for k, v in TECH_COL_FMT.items() if k in display_cols}
         st.dataframe(
-            tech_df[display_cols].style.apply(highlight_signals, axis=1),
+            tech_df[display_cols]
+            .style.apply(highlight_signals, axis=1)
+            .format(fmt, na_rep="-"),
             use_container_width=True, hide_index=True,
         )
     else:
@@ -848,13 +924,16 @@ def tab_korea() -> tuple[pd.DataFrame, pd.DataFrame]:
 
         display_cols = [
             "티커", "종목명", "현재가",
-            "RSI(14)", "RSI해석", "주봉RSI",
+            "RSI(14)", "RSI해석", "RSI다이버전스", "주봉RSI",
             "1개월(%)", "3개월(%)", "RS vs S&P(3M)",
             "매수신호", "매도신호", "신호 내역",
         ]
         display_cols = [c for c in display_cols if c in kr_tech.columns]
+        fmt = {k: v for k, v in TECH_COL_FMT.items() if k in display_cols}
         st.dataframe(
-            kr_tech[display_cols].style.apply(highlight_signals, axis=1),
+            kr_tech[display_cols]
+            .style.apply(highlight_signals, axis=1)
+            .format(fmt, na_rep="-"),
             use_container_width=True, hide_index=True,
         )
     else:
