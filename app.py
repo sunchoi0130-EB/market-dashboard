@@ -201,26 +201,37 @@ def fetch_sp500_returns() -> dict[str, float]:
         return {"1m": 0.0, "3m": 0.0, "12m": 0.0}
 
 
-@st.cache_data(ttl=300)
-def fetch_us_indices() -> pd.DataFrame:
+@st.cache_data(ttl=60)
+def fetch_us_indices() -> tuple[pd.DataFrame, str]:
+    """지수 현재가: 분봉 최신가(15분 지연). 등락률은 전일 종가 대비."""
     tickers = list(US_INDICES.keys())
+    price_ts = ""
     try:
-        raw = yf.download(
-            tickers, period="5d", interval="1d",
-            auto_adjust=True, progress=False,
-        )
-        close = raw["Close"]
-        latest = close.iloc[-1]
-        prev = close.iloc[-2]
+        # 등락률용 전일 종가
+        daily = yf.download(tickers, period="5d", interval="1d",
+                            auto_adjust=True, progress=False)
+        daily_close = daily["Close"]
+        prev_close = daily_close.iloc[-2]
+
+        # 분봉 최신가
+        rt = fetch_realtime_prices(tuple(tickers))
+        if rt:
+            sample_ts = next(iter(rt.values()))["ts"]
+            price_ts = pd.Timestamp(sample_ts).tz_convert("America/New_York").strftime("%H:%M ET")
+
         rows = []
         for t in tickers:
-            cur = float(latest[t]) if t in latest else float("nan")
-            prv = float(prev[t]) if t in prev else float("nan")
+            prv = float(prev_close[t]) if t in prev_close else float("nan")
+            # 분봉 현재가 우선, 없으면 일봉 최신가
+            if t in rt:
+                cur = rt[t]["price"]
+            else:
+                cur = float(daily_close.iloc[-1][t]) if t in daily_close.columns else float("nan")
             chg = (cur - prv) / prv * 100 if prv else float("nan")
             rows.append({"지수": US_INDICES[t], "현재가": f"{cur:,.2f}", "등락률(%)": round(chg, 2)})
-        return pd.DataFrame(rows)
+        return pd.DataFrame(rows), price_ts
     except Exception:
-        return pd.DataFrame()
+        return pd.DataFrame(), ""
 
 
 @st.cache_data(ttl=300)
@@ -252,8 +263,12 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
             hist = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True)
             if len(hist) < 52:
                 continue
-            close = hist["Close"]
-            rsi_val = float(RSIIndicator(close=close, window=14).rsi().iloc[-1])
+            close      = hist["Close"]
+            rsi_series = RSIIndicator(close=close, window=14).rsi()
+            rsi_val    = float(rsi_series.iloc[-1])
+            rsi_5d_ago = float(rsi_series.iloc[-6]) if len(rsi_series) >= 6 else rsi_val
+            rsi_delta  = round(rsi_val - rsi_5d_ago, 1)
+            rsi_trend  = f"↑+{rsi_delta}" if rsi_delta > 0 else f"↓{rsi_delta}"
             sma50   = float(SMAIndicator(close=close, window=50).sma_indicator().iloc[-1])
             sma200  = float(SMAIndicator(close=close, window=200).sma_indicator().iloc[-1])
             price   = float(close.iloc[-1])
@@ -321,20 +336,64 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
             name = TICKER_NAMES.get(base, base)
 
             rows.append({
-                "티커":      ticker.replace(".KS", ""),
-                "종목명":    name,
-                "현재가":    round(price, 2),
-                "RSI(14)":   round(rsi_val, 1),
-                "1개월(%)":  ret_1m,
-                "3개월(%)":  ret_3m,
-                "12개월(%)": ret_12m,
-                "매수신호":  buy_cnt,
-                "매도신호":  sell_cnt,
-                "신호 내역": " | ".join(signals),
+                "티커":        ticker.replace(".KS", ""),
+                "종목명":      name,
+                "현재가":      round(price, 2),
+                "RSI(14)":     round(rsi_val, 1),
+                "RSI추세(5일)": rsi_trend,
+                "1개월(%)":    ret_1m,
+                "3개월(%)":    ret_3m,
+                "12개월(%)":   ret_12m,
+                "매수신호":    buy_cnt,
+                "매도신호":    sell_cnt,
+                "신호 내역":   " | ".join(signals),
             })
         except Exception:
             continue
     return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=3600)
+def fetch_weekly_rsi(tickers: tuple[str, ...]) -> dict[str, float]:
+    """주봉(1wk) RSI(14) — 장기 과매수/과매도 판단용. 일봉 RSI와 병행 확인."""
+    result: dict[str, float] = {}
+    for ticker in tickers:
+        try:
+            hist_w = yf.Ticker(ticker).history(period="2y", interval="1wk", auto_adjust=True)
+            if len(hist_w) >= 14:
+                rsi_w = RSIIndicator(close=hist_w["Close"], window=14).rsi()
+                result[ticker.replace(".KS", "")] = round(float(rsi_w.iloc[-1]), 1)
+        except Exception:
+            continue
+    return result
+
+
+@st.cache_data(ttl=60)
+def fetch_realtime_prices(tickers: tuple[str, ...]) -> dict[str, dict]:
+    """분봉(1m) 기반 최신 현재가. 장중 15분 지연, 장외 시 전일 종가 fallback."""
+    result: dict[str, dict] = {}
+    try:
+        raw = yf.download(
+            list(tickers), period="1d", interval="1m",
+            auto_adjust=True, progress=False,
+        )
+        if raw.empty:
+            return result
+        close = raw["Close"] if isinstance(raw["Close"], pd.DataFrame) else raw[["Close"]]
+        ts = close.index[-1]
+        for ticker in tickers:
+            col = ticker if ticker in close.columns else None
+            if col is None:
+                continue
+            series = close[col].dropna()
+            if not series.empty:
+                result[ticker] = {
+                    "price": round(float(series.iloc[-1]), 2),
+                    "ts":    ts,
+                }
+    except Exception:
+        pass
+    return result
 
 
 @st.cache_data(ttl=600)
@@ -467,6 +526,14 @@ def signal_legend() -> None:
 - **매수신호 3~5** = 초록 배경 → 과반수 지표가 매수 신호
 - **매수신호 1~2** = 중립
 - **매도신호 3~5** = 빨강 배경 → 과반수 지표가 매도 신호
+
+**참고 컬럼 (신호 카운팅 미포함)**
+
+| 컬럼 | 해석 |
+|---|---|
+| RSI추세(5일) | ↑+4.1 = 5일 전보다 RSI 4.1 상승 → 반등 모멘텀 강화 중 / ↓-3.8 = 하락 → 낙폭 확대 경고 |
+| 주봉RSI | 주봉 기준 RSI. 일봉 RSI < 30 이면서 주봉 RSI도 < 40 이면 **장기 과매도** (강한 매수 후보) |
+| RS vs S&P(3M) | +10 = S&P500보다 3개월간 10%p 더 올랐음 / -5 = 5%p 덜 올랐음 |
 
 > 단독 지표로 매매 결정 금지. 국면(탭1)과 함께 종합 판단하세요.
         """)
@@ -608,8 +675,12 @@ def tab_us(phase: str | None) -> None:
     col_idx, col_sec = st.columns([1, 2])
 
     with col_idx:
-        idx_df = fetch_us_indices()
+        idx_df, price_ts = fetch_us_indices()
         if not idx_df.empty:
+            if price_ts:
+                st.caption(f"현재가 기준: {price_ts} (분봉 최신, 약 15분 지연)")
+            else:
+                st.caption("현재가 기준: 전일 종가 (장 마감)")
             def color_row(row: pd.Series) -> list[str]:
                 chg = row.get("등락률(%)", 0)
                 if chg > 0:
@@ -653,23 +724,38 @@ def tab_us(phase: str | None) -> None:
     st.markdown("##### 워치리스트 + 섹터 ETF 기술분석 신호")
     signal_legend()
 
-    with st.spinner("RSI·SMA·MACD·모멘텀 계산 중..."):
-        all_tickers = tuple(WATCHLIST + list(SECTOR_ETFS.keys()))
+    all_tickers = tuple(WATCHLIST + list(SECTOR_ETFS.keys()))
+    with st.spinner("RSI·SMA·MACD·볼린저·모멘텀 계산 중..."):
         tech_df = fetch_technical_signals(all_tickers)
 
     if not tech_df.empty:
         sp_ret = fetch_sp500_returns()
         tech_df = add_relative_strength(tech_df, sp_ret)
 
+        # 분봉 현재가 덮어쓰기
+        rt = fetch_realtime_prices(all_tickers)
+        rt_ts = ""
+        for ticker, d in rt.items():
+            mask = tech_df["티커"] == ticker
+            if mask.any():
+                tech_df.loc[mask, "현재가"] = d["price"]
+            rt_ts = pd.Timestamp(d["ts"]).tz_convert("America/New_York").strftime("%H:%M ET")
+
+        # 주봉 RSI 병합 (백그라운드에서 캐시 있으면 즉시)
+        weekly = fetch_weekly_rsi(all_tickers)
+        tech_df["주봉RSI"] = tech_df["티커"].map(weekly)
+
+        ts_label = f"현재가: {rt_ts} 기준 (분봉 15분 지연)" if rt_ts else "현재가: 전일 종가 기준"
         st.caption(
-            f"S&P500 기준 수익률 — 1개월: {sp_ret['1m']:+.1f}% | "
-            f"3개월: {sp_ret['3m']:+.1f}% | 12개월: {sp_ret['12m']:+.1f}%"
+            f"{ts_label} | S&P500 — 1개월: {sp_ret['1m']:+.1f}%  "
+            f"3개월: {sp_ret['3m']:+.1f}%  12개월: {sp_ret['12m']:+.1f}%"
         )
+        st.caption("RS vs S&P(3M): +10 = S&P500보다 3개월간 10%p 초과 성과 / -5 = 5%p 하회")
 
         display_cols = [
-            "티커", "종목명", "현재가", "RSI(14)",
-            "1개월(%)", "3개월(%)", "12개월(%)",
-            "RS vs S&P(3M)", "RS vs S&P(12M)",
+            "티커", "종목명", "현재가",
+            "RSI(14)", "RSI추세(5일)", "주봉RSI",
+            "1개월(%)", "3개월(%)", "RS vs S&P(3M)",
             "매수신호", "매도신호", "신호 내역",
         ]
         display_cols = [c for c in display_cols if c in tech_df.columns]
@@ -720,13 +806,23 @@ def tab_korea() -> tuple[pd.DataFrame, pd.DataFrame]:
         # 종목명 보강
         code_to_name = dict(zip(top10["코드"], top10["종목명"]))
         kr_tech["종목명"] = kr_tech["티커"].map(code_to_name).fillna(kr_tech["종목명"])
-        # 상대강도 (S&P500 대비)
+        # 상대강도 + 분봉 현재가 + 주봉RSI
         sp_ret = fetch_sp500_returns()
         kr_tech = add_relative_strength(kr_tech, sp_ret)
+        rt_kr = fetch_realtime_prices(yf_tickers)
+        for yf_t, d in rt_kr.items():
+            base = yf_t.replace(".KS", "")
+            mask = kr_tech["티커"] == base
+            if mask.any():
+                kr_tech.loc[mask, "현재가"] = d["price"]
+        weekly_kr = fetch_weekly_rsi(yf_tickers)
+        kr_tech["주봉RSI"] = kr_tech["티커"].map(weekly_kr)
+
         display_cols = [
-            "티커", "종목명", "현재가", "RSI(14)",
-            "1개월(%)", "3개월(%)", "12개월(%)",
-            "RS vs S&P(3M)", "매수신호", "매도신호", "신호 내역",
+            "티커", "종목명", "현재가",
+            "RSI(14)", "RSI추세(5일)", "주봉RSI",
+            "1개월(%)", "3개월(%)", "RS vs S&P(3M)",
+            "매수신호", "매도신호", "신호 내역",
         ]
         display_cols = [c for c in display_cols if c in kr_tech.columns]
         st.dataframe(
