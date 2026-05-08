@@ -343,8 +343,8 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
             ret_3m  = round((price / float(close.iloc[-63]) - 1) * 100, 1) if len(close) >= 63 else float("nan")
             ret_12m = round((price / float(close.iloc[0])   - 1) * 100, 1)
 
-            # RSI 다이버전스
-            divergence = detect_rsi_divergence(close, rsi_series)
+            # RSI 다이버전스 (OHLC 활용 — Low/High로 피봇 탐색)
+            divergence = detect_rsi_divergence(hist, rsi_series)
 
             # 종목명 조회 (섹터 ETF 또는 워치리스트)
             base = ticker.replace(".KS", "")
@@ -541,30 +541,49 @@ def _swing_highs(vals: list, window: int = 5) -> list[int]:
     return idxs
 
 
-def detect_rsi_divergence(close: pd.Series, rsi_series: pd.Series,
+def detect_rsi_divergence(hist: pd.DataFrame, rsi_series: pd.Series,
                           lookback: int = 63, window: int = 5) -> str:
     """
-    RSI 다이버전스 감지 (최근 3개월 기준).
-    강세다이버전스: 가격 저점↓ + RSI 저점↑ → 하락 모멘텀 약화, 반등 가능성
-    약세다이버전스: 가격 고점↑ + RSI 고점↓ → 상승 모멘텀 약화, 조정 가능성
-    RSI 차이 2p 이상 요구해 노이즈 억제.
-    """
-    if len(close) < lookback + window or len(rsi_series) < lookback + window:
-        return "-"
-    p = close.iloc[-lookback:].values.tolist()
-    r = rsi_series.iloc[-lookback:].values.tolist()
+    RSI 다이버전스 4종 감지 (최근 3개월, OHLC 기준).
+    스윙 저점은 Low, 스윙 고점은 High로 탐색 — 종가만 쓸 때보다 피봇 정확도 향상.
+    RSI 차이 2p 이상 요구해 노이즈 억제. 일반(반전) 신호 우선 반환.
 
-    lows = _swing_lows(p, window)
+    일반강세 : Low↓ + RSI_at_low↑  → 하락 모멘텀 약화, 반등 가능성
+    일반약세 : High↑ + RSI_at_high↓ → 상승 모멘텀 약화, 조정 가능성
+    숨겨진강세: Low↑ + RSI_at_low↓  → 상승 추세 지속 확인
+    숨겨진약세: High↓ + RSI_at_high↑ → 하락 추세 지속 확인
+    """
+    if len(hist) < lookback + window or len(rsi_series) < lookback + window:
+        return "-"
+
+    h = hist.iloc[-lookback:]
+    r = rsi_series.iloc[-lookback:].ffill()
+
+    low_v  = h["Low"].values.tolist()
+    high_v = h["High"].values.tolist()
+    rsi_v  = r.values.tolist()
+
+    # ── 저점 계열 (Low 기준) ──
+    lows = _swing_lows(low_v, window)
     if len(lows) >= 2:
         i1, i2 = lows[-2], lows[-1]
-        if p[i2] < p[i1] and r[i2] > r[i1] + 2:
-            return "🟢 강세"
+        pl1, pl2 = low_v[i1], low_v[i2]
+        rl1, rl2 = rsi_v[i1], rsi_v[i2]
+        if pl2 < pl1 and rl2 > rl1 + 2:   # 일반 강세
+            return "🟢 일반강세"
+        if pl2 > pl1 and rl2 < rl1 - 2:   # 숨겨진 강세
+            return "🔵 숨겨진강세"
 
-    highs = _swing_highs(p, window)
+    # ── 고점 계열 (High 기준) ──
+    highs = _swing_highs(high_v, window)
     if len(highs) >= 2:
         i1, i2 = highs[-2], highs[-1]
-        if p[i2] > p[i1] and r[i2] < r[i1] - 2:
-            return "🔴 약세"
+        ph1, ph2 = high_v[i1], high_v[i2]
+        rh1, rh2 = rsi_v[i1], rsi_v[i2]
+        if ph2 > ph1 and rh2 < rh1 - 2:   # 일반 약세
+            return "🔴 일반약세"
+        if ph2 < ph1 and rh2 > rh1 + 2:   # 숨겨진 약세
+            return "🟠 숨겨진약세"
 
     return "-"
 
@@ -615,15 +634,17 @@ def signal_legend() -> None:
 | 주봉RSI | 주봉 기준 RSI. 일봉 RSI < 30 이면서 주봉 RSI도 < 40 이면 **장기 과매도** (강한 매수 후보) |
 | RS vs S&P(3M) | +10 = S&P500보다 3개월간 10%p 더 올랐음 / -5 = 5%p 덜 올랐음 |
 
-**RSI 다이버전스 해석**
+**RSI 다이버전스 4종 해석** (가격 피봇은 Low/High 기준, RSI는 종가 기준)
 
-| 신호 | 조건 | 의미 |
-|---|---|---|
-| 🟢 강세다이버전스 | 가격: 직전 저점 **아래** → RSI: 직전 저점 **위** | 하락 모멘텀 약화 → 반등 선행 신호 |
-| 🔴 약세다이버전스 | 가격: 직전 고점 **위** → RSI: 직전 고점 **아래** | 상승 모멘텀 약화 → 조정 선행 신호 |
-| - | 다이버전스 없음 | 가격·RSI 방향 일치, 현재 추세 유효 |
+| 신호 | 가격 | RSI | 의미 |
+|---|---|---|---|
+| 🟢 일반강세 | 저점(Low) **낮아짐** | RSI 저점 **높아짐** | 하락 모멘텀 약화 → **반등** 선행 신호 |
+| 🔴 일반약세 | 고점(High) **높아짐** | RSI 고점 **낮아짐** | 상승 모멘텀 약화 → **조정** 선행 신호 |
+| 🔵 숨겨진강세 | 저점(Low) **높아짐** | RSI 저점 **낮아짐** | 조정 중 RSI 눌림 → **상승 추세 지속** |
+| 🟠 숨겨진약세 | 고점(High) **낮아짐** | RSI 고점 **높아짐** | 반등 중 RSI 과열 → **하락 추세 지속** |
+| - | 해당 없음 | — | 가격·RSI 방향 일치, 현재 추세 유효 |
 
-> 다이버전스는 **선행 신호**입니다. 발생 이후 즉시 전환되지 않을 수 있으며 반드시 다른 신호와 교차 확인하세요. 최근 3개월(63거래일) 스윙 저점/고점 기준으로 산출합니다.
+> **일반 다이버전스**는 추세 반전 신호, **숨겨진 다이버전스**는 추세 지속 신호입니다. 최근 3개월(63거래일) 스윙 기준. 반드시 다른 지표와 교차 확인하세요.
 
 **RSI해석 구간 기준**
 
