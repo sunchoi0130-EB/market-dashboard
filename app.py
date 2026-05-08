@@ -186,6 +186,22 @@ def fetch_sp500_ma() -> dict:
 
 
 @st.cache_data(ttl=300)
+def fetch_sp500_returns() -> dict[str, float]:
+    """S&P500의 1개월/3개월/12개월 수익률 — 상대강도 계산 벤치마크."""
+    try:
+        hist = yf.Ticker("^GSPC").history(period="1y", interval="1d", auto_adjust=True)
+        c = hist["Close"]
+        price = float(c.iloc[-1])
+        return {
+            "1m":  round((price / float(c.iloc[-22]) - 1) * 100, 2) if len(c) >= 22 else 0.0,
+            "3m":  round((price / float(c.iloc[-63]) - 1) * 100, 2) if len(c) >= 63 else 0.0,
+            "12m": round((price / float(c.iloc[0])   - 1) * 100, 2),
+        }
+    except Exception:
+        return {"1m": 0.0, "3m": 0.0, "12m": 0.0}
+
+
+@st.cache_data(ttl=300)
 def fetch_us_indices() -> pd.DataFrame:
     tickers = list(US_INDICES.keys())
     try:
@@ -295,17 +311,25 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
                 signals.append("BB 상단 이탈")
                 sell_cnt += 1
 
+            # 모멘텀 수익률 (이미 받은 hist 활용)
+            ret_1m  = round((price / float(close.iloc[-22]) - 1) * 100, 2) if len(close) >= 22 else float("nan")
+            ret_3m  = round((price / float(close.iloc[-63]) - 1) * 100, 2) if len(close) >= 63 else float("nan")
+            ret_12m = round((price / float(close.iloc[0])   - 1) * 100, 2)
+
             # 종목명 조회 (섹터 ETF 또는 워치리스트)
             base = ticker.replace(".KS", "")
             name = TICKER_NAMES.get(base, base)
 
             rows.append({
-                "티커":     ticker.replace(".KS", ""),
-                "종목명":   name,
-                "현재가":   round(price, 2),
-                "RSI(14)":  round(rsi_val, 1),
-                "매수신호": buy_cnt,
-                "매도신호": sell_cnt,
+                "티커":      ticker.replace(".KS", ""),
+                "종목명":    name,
+                "현재가":    round(price, 2),
+                "RSI(14)":   round(rsi_val, 1),
+                "1개월(%)":  ret_1m,
+                "3개월(%)":  ret_3m,
+                "12개월(%)": ret_12m,
+                "매수신호":  buy_cnt,
+                "매도신호":  sell_cnt,
                 "신호 내역": " | ".join(signals),
             })
         except Exception:
@@ -405,6 +429,16 @@ def phase_badge(phase: str) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def add_relative_strength(tech_df: pd.DataFrame, sp_ret: dict[str, float]) -> pd.DataFrame:
+    """S&P500 대비 상대강도(RS) 컬럼 추가. RS > 0 = 시장 대비 초과 성과."""
+    df = tech_df.copy()
+    if "3개월(%)" in df.columns:
+        df["RS vs S&P(3M)"] = (df["3개월(%)"] - sp_ret.get("3m", 0)).round(2)
+    if "12개월(%)" in df.columns:
+        df["RS vs S&P(12M)"] = (df["12개월(%)"] - sp_ret.get("12m", 0)).round(2)
+    return df
 
 
 def highlight_signals(row: pd.Series) -> list[str]:
@@ -619,12 +653,26 @@ def tab_us(phase: str | None) -> None:
     st.markdown("##### 워치리스트 + 섹터 ETF 기술분석 신호")
     signal_legend()
 
-    with st.spinner("RSI·SMA 계산 중..."):
+    with st.spinner("RSI·SMA·MACD·모멘텀 계산 중..."):
         all_tickers = tuple(WATCHLIST + list(SECTOR_ETFS.keys()))
         tech_df = fetch_technical_signals(all_tickers)
 
     if not tech_df.empty:
-        display_cols = ["티커", "종목명", "현재가", "RSI(14)", "매수신호", "매도신호", "신호 내역"]
+        sp_ret = fetch_sp500_returns()
+        tech_df = add_relative_strength(tech_df, sp_ret)
+
+        st.caption(
+            f"S&P500 기준 수익률 — 1개월: {sp_ret['1m']:+.1f}% | "
+            f"3개월: {sp_ret['3m']:+.1f}% | 12개월: {sp_ret['12m']:+.1f}%"
+        )
+
+        display_cols = [
+            "티커", "종목명", "현재가", "RSI(14)",
+            "1개월(%)", "3개월(%)", "12개월(%)",
+            "RS vs S&P(3M)", "RS vs S&P(12M)",
+            "매수신호", "매도신호", "신호 내역",
+        ]
+        display_cols = [c for c in display_cols if c in tech_df.columns]
         st.dataframe(
             tech_df[display_cols].style.apply(highlight_signals, axis=1),
             use_container_width=True, hide_index=True,
@@ -669,10 +717,18 @@ def tab_korea() -> tuple[pd.DataFrame, pd.DataFrame]:
         kr_tech = fetch_technical_signals(yf_tickers)
 
     if not kr_tech.empty:
-        # 종목명 보강 (top10에서 가져오기)
+        # 종목명 보강
         code_to_name = dict(zip(top10["코드"], top10["종목명"]))
         kr_tech["종목명"] = kr_tech["티커"].map(code_to_name).fillna(kr_tech["종목명"])
-        display_cols = ["티커", "종목명", "현재가", "RSI(14)", "매수신호", "매도신호", "신호 내역"]
+        # 상대강도 (S&P500 대비)
+        sp_ret = fetch_sp500_returns()
+        kr_tech = add_relative_strength(kr_tech, sp_ret)
+        display_cols = [
+            "티커", "종목명", "현재가", "RSI(14)",
+            "1개월(%)", "3개월(%)", "12개월(%)",
+            "RS vs S&P(3M)", "매수신호", "매도신호", "신호 내역",
+        ]
+        display_cols = [c for c in display_cols if c in kr_tech.columns]
         st.dataframe(
             kr_tech[display_cols].style.apply(highlight_signals, axis=1),
             use_container_width=True, hide_index=True,
@@ -742,17 +798,30 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
         us_tech = fetch_technical_signals(all_tickers)
 
     if not us_tech.empty:
+        sp_ret = fetch_sp500_returns()
+        us_tech = add_relative_strength(us_tech, sp_ret)
+        rec_cols = ["티커", "종목명", "RSI(14)", "3개월(%)", "RS vs S&P(3M)", "신호 내역"]
+        rec_cols = [c for c in rec_cols if c in us_tech.columns]
+
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**매수 관심** (매수신호 ≥ 3, 5개 중 과반수)")
-            buy_us = us_tech[us_tech["매수신호"] >= 3][["티커", "종목명", "RSI(14)", "신호 내역"]].copy()
+            st.markdown("**매수 관심** (매수신호 ≥ 3) — RS 강도순 정렬")
+            buy_us = (
+                us_tech[us_tech["매수신호"] >= 3][rec_cols]
+                .sort_values("RS vs S&P(3M)", ascending=False)
+                .copy()
+            )
             if not buy_us.empty:
                 st.dataframe(buy_us, use_container_width=True, hide_index=True)
             else:
                 st.info("현재 매수신호 ≥3 종목 없음")
         with col2:
-            st.markdown("**매도/경계** (매도신호 ≥ 3, 5개 중 과반수)")
-            sell_us = us_tech[us_tech["매도신호"] >= 3][["티커", "종목명", "RSI(14)", "신호 내역"]].copy()
+            st.markdown("**매도/경계** (매도신호 ≥ 3) — RS 약세순 정렬")
+            sell_us = (
+                us_tech[us_tech["매도신호"] >= 3][rec_cols]
+                .sort_values("RS vs S&P(3M)", ascending=True)
+                .copy()
+            )
             if not sell_us.empty:
                 st.dataframe(sell_us, use_container_width=True, hide_index=True)
             else:
