@@ -7,7 +7,8 @@ import streamlit as st
 import yfinance as yf
 import FinanceDataReader as fdr
 from ta.momentum import RSIIndicator
-from ta.trend import SMAIndicator
+from ta.trend import MACD, SMAIndicator
+from ta.volatility import BollingerBands
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -241,25 +242,57 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
             sma200  = float(SMAIndicator(close=close, window=200).sma_indicator().iloc[-1])
             price   = float(close.iloc[-1])
 
+            # MACD
+            macd_obj  = MACD(close=close)
+            macd_line = float(macd_obj.macd().iloc[-1])
+            macd_sig  = float(macd_obj.macd_signal().iloc[-1])
+
+            # Bollinger Bands (20, 2σ)
+            bb        = BollingerBands(close=close, window=20, window_dev=2)
+            bb_low    = float(bb.bollinger_lband().iloc[-1])
+            bb_high   = float(bb.bollinger_hband().iloc[-1])
+
             buy_cnt = sell_cnt = 0
             signals = []
+
+            # RSI
             if rsi_val < 30:
                 signals.append("RSI 과매도")
                 buy_cnt += 1
             elif rsi_val > 70:
                 signals.append("RSI 과매수")
                 sell_cnt += 1
+
+            # SMA50
             if price > sma50:
                 signals.append("SMA50 위")
                 buy_cnt += 1
             else:
                 signals.append("SMA50 아래")
                 sell_cnt += 1
+
+            # SMA200
             if price > sma200:
                 signals.append("SMA200 위")
                 buy_cnt += 1
             else:
                 signals.append("SMA200 아래")
+                sell_cnt += 1
+
+            # MACD 골든/데드크로스
+            if macd_line > macd_sig:
+                signals.append("MACD 골든크로스")
+                buy_cnt += 1
+            else:
+                signals.append("MACD 데드크로스")
+                sell_cnt += 1
+
+            # 볼린저밴드 이탈 (중간 구간은 신호 없음)
+            if price < bb_low:
+                signals.append("BB 하단 이탈")
+                buy_cnt += 1
+            elif price > bb_high:
+                signals.append("BB 상단 이탈")
                 sell_cnt += 1
 
             # 종목명 조회 (섹터 ETF 또는 워치리스트)
@@ -375,9 +408,9 @@ def phase_badge(phase: str) -> None:
 
 
 def highlight_signals(row: pd.Series) -> list[str]:
-    if row.get("매수신호", 0) >= 2:
+    if row.get("매수신호", 0) >= 3:
         return ["background-color:#0d3b1f"] * len(row)
-    if row.get("매도신호", 0) >= 2:
+    if row.get("매도신호", 0) >= 3:
         return ["background-color:#3b0d0d"] * len(row)
     return [""] * len(row)
 
@@ -385,17 +418,21 @@ def highlight_signals(row: pd.Series) -> list[str]:
 def signal_legend() -> None:
     with st.expander("신호 읽는 법 (클릭해서 열기)"):
         st.markdown("""
-**매수신호 / 매도신호** 숫자는 아래 3가지 조건 중 몇 개가 해당되는지를 나타냅니다.
+**매수신호 / 매도신호** 숫자는 아래 **5가지** 조건 중 몇 개가 해당되는지를 나타냅니다.
 
 | 조건 | 매수 신호 | 매도 신호 |
 |---|---|---|
 | RSI(14) | **< 30** 과매도 → 반등 가능성 | **> 70** 과매수 → 조정 가능성 |
 | SMA50 (50일 이평선) | 현재가 **위** → 단기 상승 추세 | 현재가 **아래** → 단기 하락 추세 |
 | SMA200 (200일 이평선) | 현재가 **위** → 장기 상승 추세 | 현재가 **아래** → 장기 하락 추세 |
+| MACD | **골든크로스** (MACD > 시그널) → 상승 모멘텀 | **데드크로스** (MACD < 시그널) → 하락 모멘텀 |
+| 볼린저밴드 (20일, 2σ) | **하단 이탈** → 극단적 과매도 | **상단 이탈** → 극단적 과매수 |
 
-- **매수신호 2~3** = 초록 배경 → 매수 관심 구간
-- **매수신호 1** = 중립
-- **매수신호 0 / 매도신호 2~3** = 빨강 배경 → 경계 구간
+> 볼린저밴드는 밴드 내에 있을 때는 신호 없음 (중립). 최대 매수/매도신호는 각 5개.
+
+- **매수신호 3~5** = 초록 배경 → 과반수 지표가 매수 신호
+- **매수신호 1~2** = 중립
+- **매도신호 3~5** = 빨강 배경 → 과반수 지표가 매도 신호
 
 > 단독 지표로 매매 결정 금지. 국면(탭1)과 함께 종합 판단하세요.
         """)
@@ -707,19 +744,19 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
     if not us_tech.empty:
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**매수 관심** (매수신호 ≥ 2)")
-            buy_us = us_tech[us_tech["매수신호"] >= 2][["티커", "종목명", "RSI(14)", "신호 내역"]].copy()
+            st.markdown("**매수 관심** (매수신호 ≥ 3, 5개 중 과반수)")
+            buy_us = us_tech[us_tech["매수신호"] >= 3][["티커", "종목명", "RSI(14)", "신호 내역"]].copy()
             if not buy_us.empty:
                 st.dataframe(buy_us, use_container_width=True, hide_index=True)
             else:
-                st.info("현재 매수신호 ≥2 종목 없음")
+                st.info("현재 매수신호 ≥3 종목 없음")
         with col2:
-            st.markdown("**매도/경계** (매도신호 ≥ 2)")
-            sell_us = us_tech[us_tech["매도신호"] >= 2][["티커", "종목명", "RSI(14)", "신호 내역"]].copy()
+            st.markdown("**매도/경계** (매도신호 ≥ 3, 5개 중 과반수)")
+            sell_us = us_tech[us_tech["매도신호"] >= 3][["티커", "종목명", "RSI(14)", "신호 내역"]].copy()
             if not sell_us.empty:
                 st.dataframe(sell_us, use_container_width=True, hide_index=True)
             else:
-                st.info("현재 매도신호 ≥2 종목 없음")
+                st.info("현재 매도신호 ≥3 종목 없음")
 
     st.divider()
 
@@ -727,7 +764,7 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
     if not top10.empty and not kr_tech.empty:
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**한국 매수 관심** (외국인 순매수 + 기술매수신호 ≥2)")
+            st.markdown("**한국 매수 관심** (외국인 순매수 + 기술매수신호 ≥3)")
             buy_kr_rows = []
             for _, row in top10.iterrows():
                 code = str(row.get("코드", ""))
@@ -739,7 +776,7 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
                 if not foreign_buy:
                     continue
                 match = kr_tech[kr_tech["티커"] == code]
-                if not match.empty and match.iloc[0]["매수신호"] >= 2:
+                if not match.empty and match.iloc[0]["매수신호"] >= 3:
                     buy_kr_rows.append({
                         "종목": row.get("종목명", code),
                         "외국인": "순매수",
@@ -751,8 +788,8 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
                 st.info("교차 조건(외국인 순매수 + 기술매수 ≥2) 충족 종목 없음")
 
         with col2:
-            st.markdown("**한국 경계** (기술매도신호 ≥2)")
-            sell_kr = kr_tech[kr_tech["매도신호"] >= 2][["티커", "종목명", "RSI(14)", "신호 내역"]].copy()
+            st.markdown("**한국 경계** (기술매도신호 ≥3)")
+            sell_kr = kr_tech[kr_tech["매도신호"] >= 3][["티커", "종목명", "RSI(14)", "신호 내역"]].copy()
             if not sell_kr.empty:
                 st.dataframe(sell_kr, use_container_width=True, hide_index=True)
             else:
