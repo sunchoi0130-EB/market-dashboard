@@ -44,20 +44,67 @@ SECTOR_ETFS = {
     "XLC": "통신",
 }
 
-WATCHLIST = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOGL", "JPM", "XOM", "GLD"]
+# 미국 시총 상위 10 (2026년 기준)
+WATCHLIST = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "BRK-B", "TSM"]
 
 TICKER_NAMES = {
-    "AAPL": "Apple",
-    "MSFT": "Microsoft",
-    "NVDA": "NVIDIA",
-    "TSLA": "Tesla",
-    "AMZN": "Amazon",
-    "META": "Meta",
+    # 미국 시총 TOP10
+    "NVDA":  "NVIDIA",
+    "AAPL":  "Apple",
+    "MSFT":  "Microsoft",
+    "AMZN":  "Amazon",
     "GOOGL": "Alphabet (Google)",
-    "JPM": "JP Morgan",
-    "XOM": "ExxonMobil",
-    "GLD": "금 ETF",
+    "META":  "Meta",
+    "TSLA":  "Tesla",
+    "AVGO":  "Broadcom",
+    "BRK-B": "Berkshire Hathaway",
+    "TSM":   "TSMC",
+    # Claude 섹터 추천
+    "PLTR":  "Palantir",
+    "AMD":   "AMD",
+    "CRWD":  "CrowdStrike",
+    "PANW":  "Palo Alto Networks",
+    "LLY":   "Eli Lilly",
+    "ISRG":  "Intuitive Surgical",
+    "GS":    "Goldman Sachs",
+    "V":     "Visa",
+    "NEE":   "NextEra Energy",
+    "CVX":   "Chevron",
+    "COST":  "Costco",
     **{k: f"{v} ETF" for k, v in SECTOR_ETFS.items()},
+}
+
+# ── Claude's Market Picks ─────────────────────────────────────────────────────
+# 마지막 업데이트: 2026-05-08 | 경계 국면 — AI·방산·헬스케어 선호
+# 시황 변화 시 이 딕셔너리를 수정해 추천 종목을 갱신합니다.
+
+US_CLAUDE_PICKS: dict[str, list[str]] = {
+    "AI·데이터":   ["PLTR", "AMD"],
+    "사이버보안":  ["CRWD", "PANW"],
+    "헬스케어":    ["LLY", "ISRG"],
+    "금융":        ["GS", "V"],
+    "에너지":      ["NEE", "CVX"],
+    "소비재":      ["COST"],
+}
+
+KR_CLAUDE_PICKS: dict[str, list[str]] = {
+    "반도체·장비":   ["042700", "058470"],   # 한미반도체, 리노공업
+    "방산":          ["012450", "079550"],   # 한화에어로스페이스, LIG넥스원
+    "바이오·제약":   ["128940", "000100"],   # 한미약품, 유한양행
+    "인터넷·플랫폼": ["035420"],             # NAVER
+    "금융":          ["032830", "086790"],   # 삼성생명, 하나금융지주
+}
+
+KR_CLAUDE_PICK_NAMES: dict[str, str] = {
+    "042700": "한미반도체",
+    "058470": "리노공업",
+    "012450": "한화에어로스페이스",
+    "079550": "LIG넥스원",
+    "128940": "한미약품",
+    "000100": "유한양행",
+    "035420": "NAVER",
+    "032830": "삼성생명",
+    "086790": "하나금융지주",
 }
 
 # 한국 시총 상위 10 — fdr.StockListing 실패 시 fallback
@@ -969,6 +1016,41 @@ def tab_us(phase: str | None) -> None:
     else:
         st.info("기술분석 데이터를 불러오는 중입니다...")
 
+    # ── Claude 섹터별 추천 ────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("##### Claude 섹터별 추천 (시황 기반)")
+    st.caption("2026-05-08 기준 | 경계 국면 — AI·사이버보안·헬스케어 선호. 시황 변화 시 갱신됩니다.")
+
+    us_extra_tickers = tuple(t for picks in US_CLAUDE_PICKS.values() for t in picks)
+    with st.spinner("추천 종목 분석 중..."):
+        extra_us_df = fetch_technical_signals(us_extra_tickers)
+
+    if not extra_us_df.empty:
+        ticker_to_sector = {t: s for s, tickers in US_CLAUDE_PICKS.items() for t in tickers}
+        extra_us_df["섹터"] = extra_us_df["티커"].map(ticker_to_sector)
+        extra_us_df[["신규진입", "보유판단"]] = extra_us_df.apply(
+            lambda r: pd.Series(position_guidance(r)), axis=1
+        )
+        rt_extra = fetch_realtime_prices(us_extra_tickers)
+        for ticker, d in rt_extra.items():
+            mask = extra_us_df["티커"] == ticker
+            if mask.any():
+                extra_us_df.loc[mask, "현재가"] = d["price"]
+
+        ecols = [
+            "섹터", "티커", "종목명", "현재가",
+            "RSI(14)", "RSI해석", "RSI다이버전스", "신규진입", "보유판단",
+            "1개월(%)", "3개월(%)", "매수신호", "매도신호", "신호 내역",
+        ]
+        ecols = [c for c in ecols if c in extra_us_df.columns]
+        efmt  = {k: v for k, v in TECH_COL_FMT.items() if k in ecols}
+        st.dataframe(
+            extra_us_df[ecols]
+            .style.apply(highlight_signals, axis=1)
+            .format(efmt, na_rep="-"),
+            use_container_width=True, hide_index=True,
+        )
+
 
 def tab_korea() -> tuple[pd.DataFrame, pd.DataFrame]:
     st.subheader("한국 시장")
@@ -1057,6 +1139,46 @@ def tab_korea() -> tuple[pd.DataFrame, pd.DataFrame]:
         )
     else:
         st.warning("yfinance에서 한국 종목 데이터를 가져오지 못했습니다.")
+
+    # ── Claude 한국 섹터별 추천 ───────────────────────────────────────────────
+    st.divider()
+    st.markdown("##### Claude 한국 섹터별 추천 (시황 기반)")
+    st.caption("2026-05-08 기준 | 반도체·장비, 방산, 바이오 주도주 중심. 시황 변화 시 갱신됩니다.")
+
+    kr_extra_codes  = [c for picks in KR_CLAUDE_PICKS.values() for c in picks]
+    kr_extra_tickers = tuple(f"{c}.KS" for c in kr_extra_codes)
+    code_to_sector  = {c: s for s, codes in KR_CLAUDE_PICKS.items() for c in codes}
+
+    with st.spinner("한국 추천 종목 분석 중..."):
+        kr_extra_df = fetch_technical_signals(kr_extra_tickers)
+
+    if not kr_extra_df.empty:
+        kr_extra_df["종목명"] = kr_extra_df["티커"].map(KR_CLAUDE_PICK_NAMES).fillna(kr_extra_df["종목명"])
+        kr_extra_df["섹터"]   = kr_extra_df["티커"].map(code_to_sector)
+        kr_extra_df[["신규진입", "보유판단"]] = kr_extra_df.apply(
+            lambda r: pd.Series(position_guidance(r)), axis=1
+        )
+        # fdr 현재가 덮어쓰기
+        kr_extra_prices = fetch_korean_prices_fdr(tuple(kr_extra_codes))
+        for code, d in kr_extra_prices.items():
+            mask = kr_extra_df["티커"] == code
+            if mask.any():
+                kr_extra_df.loc[mask, "현재가"] = d["price"]
+
+        kecols = [
+            "섹터", "티커", "종목명", "현재가",
+            "RSI(14)", "RSI해석", "RSI다이버전스", "신규진입", "보유판단",
+            "1개월(%)", "3개월(%)", "매수신호", "매도신호", "신호 내역",
+        ]
+        kecols = [c for c in kecols if c in kr_extra_df.columns]
+        kefmt  = {k: v for k, v in TECH_COL_FMT.items() if k in kecols}
+        kefmt["현재가"] = "{:,.0f}"
+        st.dataframe(
+            kr_extra_df[kecols]
+            .style.apply(highlight_signals, axis=1)
+            .format(kefmt, na_rep="-"),
+            use_container_width=True, hide_index=True,
+        )
 
     st.markdown("##### 외국인/기관 순매매 (최근 5일 합계)")
     st.caption("외국인·기관이 5일간 얼마나 사고 팔았는지 합계. 양수(+) = 순매수, 음수(-) = 순매도")
