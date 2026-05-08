@@ -268,7 +268,7 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
             rsi_val    = float(rsi_series.iloc[-1])
             rsi_5d_ago = float(rsi_series.iloc[-6]) if len(rsi_series) >= 6 else rsi_val
             rsi_delta  = round(rsi_val - rsi_5d_ago, 1)
-            rsi_trend  = f"↑+{rsi_delta}" if rsi_delta > 0 else f"↓{rsi_delta}"
+            rsi_trend  = rsi_context(rsi_val, rsi_delta)
             sma50   = float(SMAIndicator(close=close, window=50).sma_indicator().iloc[-1])
             sma200  = float(SMAIndicator(close=close, window=200).sma_indicator().iloc[-1])
             price   = float(close.iloc[-1])
@@ -340,7 +340,7 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
                 "종목명":      name,
                 "현재가":      round(price, 2),
                 "RSI(14)":     round(rsi_val, 1),
-                "RSI추세(5일)": rsi_trend,
+                "RSI해석":      rsi_trend,
                 "1개월(%)":    ret_1m,
                 "3개월(%)":    ret_3m,
                 "12개월(%)":   ret_12m,
@@ -490,6 +490,23 @@ def phase_badge(phase: str) -> None:
     )
 
 
+def rsi_context(rsi: float, delta: float) -> str:
+    """RSI 현재 구간 + 5일 방향을 결합한 맥락 해석."""
+    up = delta > 0
+    if rsi > 70:
+        return f"{'🔴 과매수 심화' if up else '🔴 과매수 완화'} ({delta:+.1f})"
+    elif rsi >= 60:
+        return f"⚠️ 과매수 접근 ({delta:+.1f})" if up else f"고점 이탈 중 ({delta:+.1f})"
+    elif rsi >= 50:
+        return "모멘텀 강세" if up else "모멘텀 약화"
+    elif rsi >= 40:
+        return "회복 중" if up else "하락세"
+    elif rsi >= 30:
+        return f"↑ 반등 시도 ({delta:+.1f})" if up else "과매도 근접"
+    else:
+        return f"↑ 바닥 반등 중 ({delta:+.1f})" if up else "바닥 하락 지속"
+
+
 def add_relative_strength(tech_df: pd.DataFrame, sp_ret: dict[str, float]) -> pd.DataFrame:
     """S&P500 대비 상대강도(RS) 컬럼 추가. RS > 0 = 시장 대비 초과 성과."""
     df = tech_df.copy()
@@ -531,9 +548,20 @@ def signal_legend() -> None:
 
 | 컬럼 | 해석 |
 |---|---|
-| RSI추세(5일) | ↑+4.1 = 5일 전보다 RSI 4.1 상승 → 반등 모멘텀 강화 중 / ↓-3.8 = 하락 → 낙폭 확대 경고 |
+| RSI해석 | RSI 현재 구간 + 5일 방향을 결합한 맥락 해석 (아래 표 참고) |
 | 주봉RSI | 주봉 기준 RSI. 일봉 RSI < 30 이면서 주봉 RSI도 < 40 이면 **장기 과매도** (강한 매수 후보) |
 | RS vs S&P(3M) | +10 = S&P500보다 3개월간 10%p 더 올랐음 / -5 = 5%p 덜 올랐음 |
+
+**RSI해석 구간 기준**
+
+| RSI 구간 | 방향 ↑ | 방향 ↓ |
+|---|---|---|
+| > 70 (과매수) | 🔴 과매수 심화 | 🔴 과매수 완화 |
+| 60~70 | ⚠️ 과매수 접근 | 고점 이탈 중 |
+| 50~60 | 모멘텀 강세 | 모멘텀 약화 |
+| 40~50 | 회복 중 | 하락세 |
+| 30~40 | ↑ 반등 시도 | 과매도 근접 |
+| < 30 (과매도) | ↑ 바닥 반등 중 | 바닥 하락 지속 |
 
 > 단독 지표로 매매 결정 금지. 국면(탭1)과 함께 종합 판단하세요.
         """)
@@ -754,7 +782,7 @@ def tab_us(phase: str | None) -> None:
 
         display_cols = [
             "티커", "종목명", "현재가",
-            "RSI(14)", "RSI추세(5일)", "주봉RSI",
+            "RSI(14)", "RSI해석", "주봉RSI",
             "1개월(%)", "3개월(%)", "RS vs S&P(3M)",
             "매수신호", "매도신호", "신호 내역",
         ]
@@ -820,7 +848,7 @@ def tab_korea() -> tuple[pd.DataFrame, pd.DataFrame]:
 
         display_cols = [
             "티커", "종목명", "현재가",
-            "RSI(14)", "RSI추세(5일)", "주봉RSI",
+            "RSI(14)", "RSI해석", "주봉RSI",
             "1개월(%)", "3개월(%)", "RS vs S&P(3M)",
             "매수신호", "매도신호", "신호 내역",
         ]
