@@ -536,12 +536,39 @@ def fetch_korean_prices_fdr(codes: tuple[str, ...]) -> dict[str, dict]:
 
 @st.cache_data(ttl=600)
 def fetch_investor_flow(code: str) -> pd.DataFrame | None:
+    """Naver Finance frgn 페이지 직접 파싱 — fdr.SnapDataReader가 컬럼 수 변화로 깨짐."""
     try:
-        df = fdr.SnapDataReader(f"NAVER/INVESTORS/{code}")
-        cols = [c for c in ["기관순매매량", "외국인순매매량"] if c in df.columns]
-        if not cols:
+        url = f"https://finance.naver.com/item/frgn.naver?code={code}&page=1"
+        hdrs = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        from bs4 import BeautifulSoup
+        resp = requests.get(url, headers=hdrs, timeout=10)
+        soup = BeautifulSoup(resp.text, "lxml")
+        tables = soup.find_all("table")
+        if len(tables) < 4:
             return None
-        return df[cols].tail(5)
+        rows = tables[3].find_all("tr")
+        records = []
+        for row in rows:
+            cells = [td.get_text(strip=True) for td in row.find_all("td")]
+            # 데이터 행: 날짜(YYYY.MM.DD), 종가, 전일비, 등락률, 거래량, 기관순매매, 외국인순매매, 보유주수, 보유율
+            if len(cells) >= 7 and "." in cells[0] and len(cells[0]) == 10:
+                def _parse(s: str) -> int:
+                    return int(s.replace(",", "").replace("+", "").replace("-", "-") or 0)
+                try:
+                    def _to_int(s: str) -> int:
+                        s = s.replace(",", "").replace("+", "")
+                        return int(s) if s and s != "-" else 0
+                    records.append({
+                        "날짜":           cells[0],
+                        "기관순매매량":   _to_int(cells[5]),
+                        "외국인순매매량": _to_int(cells[6]),
+                    })
+                except (ValueError, IndexError):
+                    continue
+        if not records:
+            return None
+        df = pd.DataFrame(records).set_index("날짜")
+        return df.head(5)
     except Exception:
         return None
 
