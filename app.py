@@ -1171,13 +1171,16 @@ def tab_checkup(phase: str | None) -> None:
     st.markdown("---")
     st.markdown(f"### {ticker_input.upper()} 검진 결과")
 
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("현재가", fmt_p(r["price"]))
-    c2.metric("1주", fmt_ret(r["ret_1w"]))
-    c3.metric("1개월", fmt_ret(r["ret_1m"]))
-    c4.metric("3개월", fmt_ret(r["ret_3m"]))
-    c5.metric("6개월", fmt_ret(r["ret_6m"]))
-    c6.metric("1년", fmt_ret(r["ret_1y"]))
+    st.markdown(
+        f"<div style='font-size:2rem;font-weight:700;margin-bottom:4px'>{fmt_p(r['price'])}</div>",
+        unsafe_allow_html=True,
+    )
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("1주", fmt_ret(r["ret_1w"]))
+    c2.metric("1개월", fmt_ret(r["ret_1m"]))
+    c3.metric("3개월", fmt_ret(r["ret_3m"]))
+    c4.metric("6개월", fmt_ret(r["ret_6m"]))
+    c5.metric("1년", fmt_ret(r["ret_1y"]))
 
     pos52 = r["pos52"]
     filled = int(pos52 / 10)
