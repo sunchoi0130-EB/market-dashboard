@@ -1093,6 +1093,27 @@ def tab_checkup(phase: str | None) -> None:
     st.markdown("---")
     st.markdown(f"#### 기술 신호 &nbsp; `{effective_phase}` 국면 가중치 적용")
 
+    with st.expander("📖 신호 읽는 법 — 각 지표가 무엇을 의미하는지 (클릭)"):
+        st.markdown("""
+**원점수** — 신호 방향: +1(매수), -1(매도), 0(중립)
+
+**가중치** — 현재 시장 국면에서 이 신호가 얼마나 신뢰할 수 있는지의 배수입니다.
+예: 강세장에서 MACD는 1.3배로 더 믿을 수 있지만, 볼린저 상단 이탈 경고는 0.5배로 덜 믿습니다.
+
+**가중점수** — 원점수 × 가중치. 이것들을 모두 합산해 최종 매수/매도점수를 냅니다.
+
+| 신호 | 뜻 |
+|---|---|
+| **RSI** | 최근 14일 상승폭 vs 하락폭 비율. 70 초과 = 너무 많이 올랐다, 30 미만 = 너무 많이 내렸다 |
+| **SMA50** | 50일 이동평균선. 현재가가 위에 있으면 단기 상승 추세 |
+| **SMA200** | 200일 이동평균선. 장기 강세/약세 기준선. 위에 있으면 장기 상승 추세 |
+| **MACD** | 단기·장기 이평선의 간격. 골든크로스 = 상승 모멘텀 시작, 데드크로스 = 하락 시작 |
+| **BB(볼린저밴드)** | 20일 이평선 ±2σ. 상단 이탈 = 과열, 하단 이탈 = 과매도 |
+| **거래량** | 오늘 거래량이 20일 평균의 몇 배인지. 1.5배 이상이면 큰 손의 움직임 |
+| **52주 신고가권** | 52주 최고가의 95% 이상에 있으면 모멘텀 지속 가능성 높음 |
+| **ADX** | 추세의 강도. 25 이상 = 추세장(신호 신뢰도 높음), 25 미만 = 횡보장(신호 불안정) |
+        """)
+
     if not r["trending"]:
         st.warning(f"ADX {r['adx_val']:.1f} — **횡보장** 감지. RSI 극단 신호(과매수/과매도) 가중치 50% 하향 적용됨.")
 
@@ -1122,38 +1143,109 @@ def tab_checkup(phase: str | None) -> None:
 
     # ── 3. 보조 지표 ──────────────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("#### 보조 지표 (정보용 — 점수 미포함)")
+    st.markdown("#### 보조 지표 <small style='color:#888;font-weight:normal'>— 점수에 포함되지 않는 참고 정보</small>",
+                unsafe_allow_html=True)
 
-    b1, b2, b3, b4 = st.columns(4)
-    b1.metric(
-        "OBV 추세",
-        "📈 상승 (매집)" if r["obv_rising"] else "📉 하락 (분산)",
+    def _card(title: str, value: str, explanation: str, bg: str = "#1A1F2E") -> str:
+        return (
+            f"<div style='padding:14px 16px;background:{bg};border-radius:8px;"
+            f"margin-bottom:10px;line-height:1.6'>"
+            f"<div style='color:#aaa;font-size:0.8rem;margin-bottom:4px'>{title}</div>"
+            f"<div style='font-size:1.15rem;font-weight:600;margin-bottom:6px'>{value}</div>"
+            f"<div style='color:#999;font-size:0.82rem'>{explanation}</div>"
+            f"</div>"
+        )
+
+    left_col, right_col = st.columns(2)
+
+    # ── OBV
+    obv_val   = "📈 상승 중 (매집)" if r["obv_rising"] else "📉 하락 중 (분산)"
+    obv_bg    = "#0d2a18" if r["obv_rising"] else "#2a0d0d"
+    obv_exp   = (
+        "오르는 날 거래량이 더 많음 → 기관·세력이 조용히 사 모으고 있다는 신호입니다."
+        if r["obv_rising"] else
+        "내리는 날 거래량이 더 많음 → 팔려는 세력이 우세하다는 신호입니다."
     )
+    left_col.markdown(_card("OBV (거래량 누적 추세)", obv_val,
+        f"가격은 속일 수 있어도 거래량은 속이기 어렵습니다. {obv_exp}"), unsafe_allow_html=True)
+
+    # ── ATR
     atr_str = f"{r['atr_val']:,.0f}원" if is_kr else f"{r['atr_val']:.2f}"
-    b2.metric("ATR — 일 변동폭", f"{atr_str} ({r['atr_pct']:.1f}%)")
-    b3.metric(
-        "볼린저 위치",
-        f"{r['bb_pct']:.0f}%",
-        "상단 이탈 과열" if r["bb_pct"] > 100 else (
-            "하단 이탈 과매도" if r["bb_pct"] < 0 else "밴드 내 정상"),
-        delta_color="inverse" if r["bb_pct"] > 100 else (
-            "normal" if r["bb_pct"] < 0 else "off"),
-    )
-    b4.metric("SMA20", f"{r['sma20']:,.0f}" if is_kr else f"{r['sma20']:.2f}",
-              "위 ↑" if r["price"] > r["sma20"] else "아래 ↓")
+    atr_val_str = f"{atr_str} &nbsp;(현재가 대비 {r['atr_pct']:.1f}%)"
+    left_col.markdown(_card("ATR — 14일 평균 일 변동폭", atr_val_str,
+        f"하루에 평균 <b>{r['atr_pct']:.1f}%</b> 움직이는 종목입니다. "
+        "손절 기준선 설정이나 매수 수량 결정 시 이 폭을 감안하세요. "
+        f"변동폭이 클수록 리스크와 기회가 모두 큽니다."), unsafe_allow_html=True)
+
+    # ── 볼린저 밴드 위치
+    bp = r["bb_pct"]
+    if bp > 100:
+        bb_val_str = f"{bp:.0f}% ― 상단 밴드 이탈 (과열)"
+        bb_bg  = "#2a0d0d"
+        bb_exp = (f"현재가({fmt_p(r['price'])})가 상단 밴드({fmt_p(r['bb_high'])})를 초과했습니다. "
+                  "통계적으로 가격이 과도하게 오른 상태로, 단기 조정 가능성이 높습니다. "
+                  "신규 진입은 밴드 내로 되돌아올 때를 노리는 것이 유리합니다.")
+    elif bp < 0:
+        bb_val_str = f"{bp:.0f}% ― 하단 밴드 이탈 (과매도)"
+        bb_bg  = "#0d2a18"
+        bb_exp = (f"현재가({fmt_p(r['price'])})가 하단 밴드({fmt_p(r['bb_low'])})를 하회했습니다. "
+                  "통계적으로 과도하게 내린 상태로, 단기 반등 가능성이 있습니다. "
+                  "단, 강한 하락 추세에서는 이탈이 지속될 수 있으니 다른 신호와 교차 확인하세요.")
+    elif bp >= 70:
+        bb_val_str = f"{bp:.0f}% ― 상단 밴드 근접"
+        bb_bg  = "#1f1a0d"
+        bb_exp = "상단에 가까워지고 있습니다. 아직 밴드 내에 있지만 추가 상승 시 이탈 가능성이 있습니다."
+    elif bp <= 30:
+        bb_val_str = f"{bp:.0f}% ― 하단 밴드 근접"
+        bb_bg  = "#0d1f1a"
+        bb_exp = "하단에 가까워지고 있습니다. 지지선으로 작용할 수 있으나 이탈 시 하락 가속 가능성도 있습니다."
+    else:
+        bb_val_str = f"{bp:.0f}% ― 밴드 중앙 부근"
+        bb_bg  = "#1A1F2E"
+        bb_exp = "상·하단 어느 쪽에도 치우치지 않은 중립 구간입니다."
+    right_col.markdown(_card(
+        "볼린저 밴드 위치 (0% = 하단, 50% = 중간선, 100% = 상단)",
+        bb_val_str,
+        f"밴드: 하단 {fmt_p(r['bb_low'])} / 중간 {fmt_p(r['bb_mid'])} / 상단 {fmt_p(r['bb_high'])}. "
+        + bb_exp, bb_bg), unsafe_allow_html=True)
+
+    # ── SMA20
+    sma_pos   = "위" if r["price"] > r["sma20"] else "아래"
+    sma_bg    = "#0d2a18" if r["price"] > r["sma20"] else "#2a0d0d"
+    sma20_fmt = f"{r['sma20']:,.0f}원" if is_kr else f"{r['sma20']:.2f}"
+    sma50_fmt = f"{r['sma50']:,.0f}원" if is_kr else f"{r['sma50']:.2f}"
+    sma200_fmt= f"{r['sma200']:,.0f}원" if is_kr else f"{r['sma200']:.2f}"
+    right_col.markdown(_card(
+        "이동평균선 (SMA) — 일정 기간 종가의 평균",
+        f"현재가 {sma_pos} &nbsp;|&nbsp; SMA20: {sma20_fmt}",
+        f"SMA(이동평균선)은 추세의 방향을 보여줍니다. "
+        f"현재가가 선 위 = 해당 기간 평균보다 비싸게 거래 중 (상승 추세), 아래 = 하락 추세.<br>"
+        f"SMA20: {sma20_fmt} / SMA50: {sma50_fmt} / SMA200: {sma200_fmt}",
+        sma_bg), unsafe_allow_html=True)
 
     # ── 4. 종합 진단 ──────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("#### 종합 진단")
+    st.caption(
+        "가중 매수/매도점수: 각 신호를 국면별 신뢰도로 가중합산한 값입니다. "
+        "3.0 이상이면 해당 방향 신호가 우세하다고 판단합니다. "
+        f"(현재 국면 '{effective_phase}'에서 최대 가중 매수점수: 약 7~9점)"
+    )
 
     g1, g2, g3, g4 = st.columns(4)
     g1.metric("가중 매수점수", f"{r['buy_score']:.1f}",
-              "≥3.0 진입 고려" if r["buy_score"] >= 3.0 else "3.0 미달")
+              "✓ 3.0 이상 — 진입 고려" if r["buy_score"] >= 3.0 else "3.0 미달")
     g2.metric("가중 매도점수", f"{r['sell_score']:.1f}",
-              "≥3.0 경계 요망" if r["sell_score"] >= 3.0 else "3.0 미달",
+              "⚠ 3.0 이상 — 경계 요망" if r["sell_score"] >= 3.0 else "3.0 미달",
               delta_color="inverse")
     g3.metric("신규진입 판단", r["entry"])
     g4.metric("보유 판단", r["hold"])
+
+    st.caption(
+        "신규진입: 지금 처음 사는 경우의 타이밍 판단. "
+        "보유판단: 이미 보유 중인 경우 계속 들고 있어야 하는지 판단. "
+        "같은 종목이라도 두 판단이 다를 수 있습니다 — 보유자는 추세가 살아있는 한 더 오래 들고 가는 게 유리합니다."
+    )
 
     entry_color = {
         "✅ 진입 적합":      "#00C851",
