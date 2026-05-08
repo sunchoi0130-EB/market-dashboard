@@ -456,6 +456,25 @@ def fetch_kospi_top10() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=600)
+def fetch_korean_prices_fdr(codes: tuple[str, ...]) -> dict[str, dict]:
+    """fdr(Naver Finance → KRX)로 한국 종목 최신 종가 조회.
+    yfinance .KS는 Yahoo 서버 경유로 최대 1일 지연이 발생할 수 있어 fdr을 우선 사용."""
+    result: dict[str, dict] = {}
+    start = (pd.Timestamp.today() - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+    for code in codes:
+        try:
+            df = fdr.DataReader(code, start=start)
+            if not df.empty:
+                result[code] = {
+                    "price": round(float(df["Close"].iloc[-1]), 1),
+                    "date":  df.index[-1].strftime("%Y-%m-%d"),
+                }
+        except Exception:
+            continue
+    return result
+
+
+@st.cache_data(ttl=600)
 def fetch_investor_flow(code: str) -> pd.DataFrame | None:
     try:
         df = fdr.SnapDataReader(f"NAVER/INVESTORS/{code}")
@@ -606,6 +625,47 @@ def highlight_signals(row: pd.Series) -> list[str]:
     return [""] * len(row)
 
 
+def position_guidance(row: pd.Series) -> tuple[str, str]:
+    """매수/매도신호 + RSI + 다이버전스를 종합해 신규진입·보유판단 레이블 반환."""
+    buy  = int(row.get("매수신호", 0))
+    sell = int(row.get("매도신호", 0))
+    rsi  = float(row.get("RSI(14)", 50))
+    div  = str(row.get("RSI다이버전스", "-"))
+
+    bearish    = div in ("🔴 일반약세", "🟠 숨겨진약세")
+    bullish    = div in ("🟢 일반강세", "🔵 숨겨진강세")
+    overbought = rsi >= 70
+    oversold   = rsi <= 30
+
+    # 신규 진입
+    if sell >= 4 or (bearish and sell >= 2):
+        entry = "⛔ 진입 보류"
+    elif buy >= 4 and not overbought:
+        entry = "✅ 진입 적합"
+    elif buy >= 3 and overbought:
+        entry = "⏳ 조정 후 진입"
+    elif oversold and bullish:
+        entry = "🔍 분할 매수 검토"
+    elif buy >= 3:
+        entry = "✅ 진입 적합"
+    else:
+        entry = "👀 관망"
+
+    # 보유 판단 — 강세 다이버전스는 과매수 경고보다 우선
+    if (bearish and sell >= 3) or sell >= 4:
+        hold = "🚨 매도 검토"
+    elif overbought and sell >= 2 and not bullish:
+        hold = "⚠️ 부분 차익 검토"
+    elif bullish or buy >= 3:
+        hold = "✊ 보유 유지"
+    elif sell >= 3:
+        hold = "🚨 매도 검토"
+    else:
+        hold = "✊ 보유 유지"
+
+    return entry, hold
+
+
 def signal_legend() -> None:
     with st.expander("신호 읽는 법 (클릭해서 열기)"):
         st.markdown("""
@@ -633,6 +693,20 @@ def signal_legend() -> None:
 | RSI다이버전스 | 가격 방향과 RSI 방향이 엇갈릴 때 추세 전환 선행 신호 (아래 표 참고) |
 | 주봉RSI | 주봉 기준 RSI. 일봉 RSI < 30 이면서 주봉 RSI도 < 40 이면 **장기 과매도** (강한 매수 후보) |
 | RS vs S&P(3M) | +10 = S&P500보다 3개월간 10%p 더 올랐음 / -5 = 5%p 덜 올랐음 |
+| 신규진입 | 지금 처음 매수하는 경우의 타이밍 판단 (아래 표 참고) |
+| 보유판단 | 이미 보유 중인 경우의 매도/유지 판단 (아래 표 참고) |
+
+**신규진입 / 보유판단 해석 기준**
+
+| 신규진입 | 조건 | 보유판단 | 조건 |
+|---|---|---|---|
+| ✅ 진입 적합 | 매수신호 ≥ 3, RSI 정상 범위 | ✊ 보유 유지 | 강세 다이버전스 or 매수신호 ≥ 3 |
+| ⏳ 조정 후 진입 | 매수신호 ≥ 3, RSI 과매수 (지금 아닌 눌릴 때 진입) | ⚠️ 부분 차익 검토 | RSI 과매수 + 매도신호 ≥ 2 (다이버전스 없음) |
+| 🔍 분할 매수 검토 | 과매도 + 강세 다이버전스 | 🚨 매도 검토 | 약세 다이버전스 + 매도신호 ≥ 3, or 매도신호 4~5 |
+| ⛔ 진입 보류 | 매도신호 ≥ 4, or 약세 다이버전스 + 매도신호 ≥ 2 | | |
+| 👀 관망 | 신호 혼재, 방향 불명확 | | |
+
+> **신규진입과 보유판단은 다른 기준입니다.** 보유 중이라면 추세가 살아있는 한 계속 들고 가는 것이 유리하고, 신규 진입은 과매수 구간을 피해야 합니다. 같은 종목이라도 두 판단이 다를 수 있습니다.
 
 **RSI 다이버전스 4종 해석** (가격 피봇은 Low/High 기준, RSI는 종가 기준)
 
@@ -863,9 +937,14 @@ def tab_us(phase: str | None) -> None:
                 tech_df.loc[mask, "현재가"] = d["price"]
             rt_ts = pd.Timestamp(d["ts"]).tz_convert("America/New_York").strftime("%H:%M ET")
 
-        # 주봉 RSI 병합 (백그라운드에서 캐시 있으면 즉시)
+        # 주봉 RSI 병합
         weekly = fetch_weekly_rsi(all_tickers)
         tech_df["주봉RSI"] = tech_df["티커"].map(weekly)
+
+        # 신규진입 / 보유판단 종합 해석
+        tech_df[["신규진입", "보유판단"]] = tech_df.apply(
+            lambda r: pd.Series(position_guidance(r)), axis=1
+        )
 
         ts_label = f"현재가: {rt_ts} 기준 (분봉 15분 지연)" if rt_ts else "현재가: 전일 종가 기준"
         st.caption(
@@ -879,6 +958,7 @@ def tab_us(phase: str | None) -> None:
             "RSI(14)", "RSI해석", "RSI다이버전스", "주봉RSI",
             "1개월(%)", "3개월(%)", "RS vs S&P(3M)",
             "매수신호", "매도신호", "신호 내역",
+            "신규진입", "보유판단",
         ]
         display_cols = [c for c in display_cols if c in tech_df.columns]
         fmt = {k: v for k, v in TECH_COL_FMT.items() if k in display_cols}
@@ -931,23 +1011,43 @@ def tab_korea() -> tuple[pd.DataFrame, pd.DataFrame]:
         # 종목명 보강
         code_to_name = dict(zip(top10["코드"], top10["종목명"]))
         kr_tech["종목명"] = kr_tech["티커"].map(code_to_name).fillna(kr_tech["종목명"])
-        # 상대강도 + 분봉 현재가 + 주봉RSI
+        # 상대강도 + 주봉RSI
         sp_ret = fetch_sp500_returns()
         kr_tech = add_relative_strength(kr_tech, sp_ret)
-        rt_kr = fetch_realtime_prices(yf_tickers)
-        for yf_t, d in rt_kr.items():
-            base = yf_t.replace(".KS", "")
-            mask = kr_tech["티커"] == base
-            if mask.any():
-                kr_tech.loc[mask, "현재가"] = d["price"]
         weekly_kr = fetch_weekly_rsi(yf_tickers)
         kr_tech["주봉RSI"] = kr_tech["티커"].map(weekly_kr)
+
+        # 현재가: KRX 직접(fdr) 우선 — yfinance .KS는 Yahoo 경유로 최대 1일 지연
+        kr_prices = fetch_korean_prices_fdr(tuple(codes))
+        price_date = ""
+        for code, d in kr_prices.items():
+            mask = kr_tech["티커"] == code
+            if mask.any():
+                kr_tech.loc[mask, "현재가"] = d["price"]
+            price_date = d.get("date", "")
+        if not kr_prices:
+            # fdr 실패 시 yfinance 분봉 fallback
+            rt_kr = fetch_realtime_prices(yf_tickers)
+            for yf_t, d in rt_kr.items():
+                base = yf_t.replace(".KS", "")
+                mask = kr_tech["티커"] == base
+                if mask.any():
+                    kr_tech.loc[mask, "현재가"] = d["price"]
+
+        # 신규진입 / 보유판단
+        kr_tech[["신규진입", "보유판단"]] = kr_tech.apply(
+            lambda r: pd.Series(position_guidance(r)), axis=1
+        )
+
+        if price_date:
+            st.caption(f"현재가: {price_date} KRX 종가 기준 (Naver Finance 직접 조회)")
 
         display_cols = [
             "티커", "종목명", "현재가",
             "RSI(14)", "RSI해석", "RSI다이버전스", "주봉RSI",
             "1개월(%)", "3개월(%)", "RS vs S&P(3M)",
             "매수신호", "매도신호", "신호 내역",
+            "신규진입", "보유판단",
         ]
         display_cols = [c for c in display_cols if c in kr_tech.columns]
         fmt = {k: v for k, v in TECH_COL_FMT.items() if k in display_cols}
@@ -1024,7 +1124,10 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
     if not us_tech.empty:
         sp_ret = fetch_sp500_returns()
         us_tech = add_relative_strength(us_tech, sp_ret)
-        rec_cols = ["티커", "종목명", "RSI(14)", "3개월(%)", "RS vs S&P(3M)", "신호 내역"]
+        us_tech[["신규진입", "보유판단"]] = us_tech.apply(
+            lambda r: pd.Series(position_guidance(r)), axis=1
+        )
+        rec_cols = ["티커", "종목명", "RSI(14)", "3개월(%)", "RS vs S&P(3M)", "신규진입", "보유판단", "신호 내역"]
         rec_cols = [c for c in rec_cols if c in us_tech.columns]
 
         col1, col2 = st.columns(2)
