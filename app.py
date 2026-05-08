@@ -7,8 +7,9 @@ import streamlit as st
 import yfinance as yf
 import FinanceDataReader as fdr
 from ta.momentum import RSIIndicator
-from ta.trend import MACD, SMAIndicator
-from ta.volatility import BollingerBands
+from ta.trend import MACD, SMAIndicator, ADXIndicator
+from ta.volatility import BollingerBands, AverageTrueRange
+from ta.volume import OnBalanceVolumeIndicator
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -168,6 +169,57 @@ FG_RATING_KR = {
     "Neutral": "중립",
     "Greed": "탐욕",
     "Extreme Greed": "극도의 탐욕",
+}
+
+# ── Phase별 신호 가중치 ────────────────────────────────────────────────────────
+# 근거: 추세장(강세)에서 모멘텀 신호 신뢰도↑, 반전 신호(볼린저 과매수 경고 등) 신뢰도↓
+#       공포/조정에서 평균회귀 신호(RSI 과매도, 강세 다이버전스) 신뢰도↑
+#       ADX는 추세 강도 필터로 사용 — ADX<20 횡보장에서 RSI 과매수/과매도 신뢰도 50% 하향
+PHASE_SIGNAL_WEIGHTS: dict[str, dict[str, float]] = {
+    "강세": {
+        "rsi_oversold":    0.7,   # 추세장에서 RSI 30 이하는 드물고, 나와도 추세 강해 반등 약함
+        "rsi_overbought":  0.5,   # 추세장에서 과매수는 경고보다 강세 지속 신호에 가까움
+        "sma50":           1.0,
+        "sma200":          1.0,
+        "macd":            1.3,   # 추세 확인 지표 — 강세장에서 신뢰도 높음
+        "bb_lower":        1.0,
+        "bb_upper":        0.5,   # 추세장 상단 이탈은 매도보다 강세 지속 가능성
+        "volume":          1.3,   # 거래량 동반 상승 — 추세장에서 더 의미 있음
+        "high52w":         1.5,   # 52주 신고가 — 모멘텀 지속 효과 강세장에서 강함
+    },
+    "경계": {
+        "rsi_oversold":    1.0,
+        "rsi_overbought":  1.2,
+        "sma50":           1.0,
+        "sma200":          1.0,
+        "macd":            0.8,   # 경계장 MACD는 후행 — 다이버전스 신뢰도가 더 높음
+        "bb_lower":        1.2,
+        "bb_upper":        1.5,   # 경계장 상단 이탈은 조정 경고로 신뢰도 높음
+        "volume":          1.0,
+        "high52w":         0.8,   # 경계장 신고가 돌파는 지속성 불확실
+    },
+    "조정": {
+        "rsi_oversold":    1.5,   # 조정장 RSI 과매도 = 강한 반등 신호
+        "rsi_overbought":  1.3,
+        "sma50":           0.8,   # 조정장 SMA 이탈은 흔함 — 신뢰도 낮춤
+        "sma200":          1.2,   # 장기선은 여전히 중요
+        "macd":            0.8,
+        "bb_lower":        1.5,
+        "bb_upper":        1.3,
+        "volume":          1.2,
+        "high52w":         0.5,   # 조정장 신고가는 거의 없고 의미 약함
+    },
+    "공포": {
+        "rsi_oversold":    1.5,
+        "rsi_overbought":  0.7,   # 공포장 RSI 과매수는 드문 케이스
+        "sma50":           0.7,
+        "sma200":          1.0,
+        "macd":            0.7,
+        "bb_lower":        1.5,
+        "bb_upper":        0.7,
+        "volume":          1.3,   # 공포 바닥에서 거래량 급증은 반전 신호
+        "high52w":         0.3,
+    },
 }
 
 # 기술분석 테이블 숫자 컬럼 표시 포맷 (소수점 1자리 강제)
@@ -751,6 +803,404 @@ def position_guidance(row: pd.Series) -> tuple[str, str]:
         hold = "✊ 보유 유지"
 
     return entry, hold
+
+
+@st.cache_data(ttl=300)
+def compute_checkup(ticker_input: str, phase: str) -> dict | None:
+    """단일 종목 종합 검진 — ADX·거래량·OBV·ATR·52주 신호 + Phase 가중치 적용."""
+    is_korean = ticker_input.isdigit() and len(ticker_input) == 6
+    yf_ticker = f"{ticker_input}.KS" if is_korean else ticker_input.upper()
+    try:
+        hist = yf.Ticker(yf_ticker).history(period="1y", interval="1d", auto_adjust=True)
+        if len(hist) < 60:
+            return None
+        close  = hist["Close"]
+        high_s = hist["High"]
+        low_s  = hist["Low"]
+        vol_s  = hist["Volume"]
+        price  = float(close.iloc[-1])
+
+        # ── 기간별 수익률 ────────────────────────────────────────────────────
+        def _ret(n: int) -> float:
+            return round((price / float(close.iloc[-n]) - 1) * 100, 1) if len(close) >= n else float("nan")
+
+        # ── 52주 고저 ────────────────────────────────────────────────────────
+        high52 = float(high_s.max())
+        low52  = float(low_s.min())
+        pos52  = round((price - low52) / (high52 - low52) * 100, 1) if high52 != low52 else 50.0
+        near_high = price >= high52 * 0.95
+
+        # ── RSI ──────────────────────────────────────────────────────────────
+        rsi_series = RSIIndicator(close=close, window=14).rsi()
+        rsi_val    = float(rsi_series.iloc[-1])
+        rsi_5d_ago = float(rsi_series.iloc[-6]) if len(rsi_series) >= 6 else rsi_val
+        rsi_delta  = round(rsi_val - rsi_5d_ago, 1)
+        divergence = detect_rsi_divergence(hist, rsi_series)
+
+        # ── MACD ─────────────────────────────────────────────────────────────
+        macd_obj  = MACD(close=close)
+        macd_line = float(macd_obj.macd().iloc[-1])
+        macd_sig  = float(macd_obj.macd_signal().iloc[-1])
+        macd_hist = round(macd_line - macd_sig, 2)
+
+        # ── 볼린저 ───────────────────────────────────────────────────────────
+        bb      = BollingerBands(close=close, window=20, window_dev=2)
+        bb_low  = float(bb.bollinger_lband().iloc[-1])
+        bb_high = float(bb.bollinger_hband().iloc[-1])
+        bb_mid  = float(bb.bollinger_mavg().iloc[-1])
+        bb_pct  = round((price - bb_low) / (bb_high - bb_low) * 100, 1) if bb_high != bb_low else 50.0
+
+        # ── SMA ──────────────────────────────────────────────────────────────
+        sma20  = float(SMAIndicator(close=close, window=20).sma_indicator().iloc[-1])
+        sma50  = float(SMAIndicator(close=close, window=50).sma_indicator().iloc[-1])
+        sma200 = float(SMAIndicator(close=close, window=200).sma_indicator().iloc[-1])
+
+        # ── ADX (추세 강도 필터) ─────────────────────────────────────────────
+        adx_obj  = ADXIndicator(high=high_s, low=low_s, close=close, window=14)
+        adx_val  = float(adx_obj.adx().iloc[-1])
+        adx_pos  = float(adx_obj.adx_pos().iloc[-1])
+        adx_neg  = float(adx_obj.adx_neg().iloc[-1])
+        trending = adx_val >= 25
+
+        # ── 거래량 ───────────────────────────────────────────────────────────
+        vol_now   = float(vol_s.iloc[-1])
+        vol_avg20 = float(vol_s.iloc[-20:].mean()) if len(vol_s) >= 20 else vol_now
+        vol_ratio = round(vol_now / vol_avg20, 2) if vol_avg20 > 0 else 1.0
+        high_vol  = vol_ratio >= 1.5
+        ret_1w    = _ret(5)
+
+        # ── OBV ─────────────────────────────────────────────────────────────
+        obv_series = OnBalanceVolumeIndicator(close=close, volume=vol_s).on_balance_volume()
+        obv_rising = bool(obv_series.iloc[-1] > obv_series.rolling(20).mean().iloc[-1])
+
+        # ── ATR ──────────────────────────────────────────────────────────────
+        atr_val = float(AverageTrueRange(high=high_s, low=low_s, close=close, window=14).average_true_range().iloc[-1])
+        atr_pct = round(atr_val / price * 100, 2)
+
+        # ── Phase 가중치 + 신호 계산 ─────────────────────────────────────────
+        wt = PHASE_SIGNAL_WEIGHTS.get(phase, PHASE_SIGNAL_WEIGHTS["경계"])
+        adx_factor = 0.5 if not trending else 1.0  # 횡보장에서 RSI 극단 신호 신뢰도 하향
+
+        buy_score = sell_score = 0.0
+        signal_rows: list[tuple] = []
+
+        def _add(label: str, interp: str, direction: int, key: str, extra_factor: float = 1.0) -> None:
+            nonlocal buy_score, sell_score
+            w = round(wt[key] * extra_factor, 2)
+            ws = round(direction * w, 2)
+            signal_rows.append((label, interp, direction, w, ws))
+            if direction > 0:
+                buy_score += w
+            else:
+                sell_score += w
+
+        def _neutral(label: str, interp: str) -> None:
+            signal_rows.append((label, interp, 0, "-", 0))
+
+        # RSI
+        if rsi_val < 30:
+            _add(f"RSI {rsi_val:.1f}", "과매도 → 반등 가능", +1, "rsi_oversold", adx_factor)
+        elif rsi_val > 70:
+            _add(f"RSI {rsi_val:.1f}", "과매수 → 조정 가능", -1, "rsi_overbought", adx_factor)
+        else:
+            _neutral(f"RSI {rsi_val:.1f}", rsi_context(rsi_val, rsi_delta))
+
+        # SMA50
+        if price > sma50:
+            _add(f"SMA50 {sma50:,.0f}", "현재가 위 → 단기 상승 추세", +1, "sma50")
+        else:
+            _add(f"SMA50 {sma50:,.0f}", "현재가 아래 → 단기 하락 추세", -1, "sma50")
+
+        # SMA200
+        if price > sma200:
+            _add(f"SMA200 {sma200:,.0f}", "현재가 위 → 장기 상승 추세", +1, "sma200")
+        else:
+            _add(f"SMA200 {sma200:,.0f}", "현재가 아래 → 장기 하락 추세", -1, "sma200")
+
+        # MACD
+        if macd_line > macd_sig:
+            _add(f"MACD {macd_hist:+.1f}", "골든크로스 → 상승 모멘텀", +1, "macd")
+        else:
+            _add(f"MACD {macd_hist:+.1f}", "데드크로스 → 하락 모멘텀", -1, "macd")
+
+        # 볼린저
+        if price < bb_low:
+            _add(f"BB {bb_pct:.0f}%", "하단 이탈 → 과매도 극단", +1, "bb_lower")
+        elif price > bb_high:
+            _add(f"BB {bb_pct:.0f}%", "상단 이탈 → 단기 과열", -1, "bb_upper")
+        else:
+            _neutral(f"BB {bb_pct:.0f}%", "밴드 내 정상 범위")
+
+        # 거래량 (가격 방향 결합)
+        if high_vol:
+            if pd.notna(ret_1w) and ret_1w > 0:
+                _add(f"거래량 {vol_ratio:.1f}배", "고거래량 상승 → 신뢰도 강화", +1, "volume")
+            elif pd.notna(ret_1w) and ret_1w < 0:
+                _add(f"거래량 {vol_ratio:.1f}배", "고거래량 하락 → 매도 압력", -1, "volume")
+            else:
+                _neutral(f"거래량 {vol_ratio:.1f}배", "고거래량 (방향 불명)")
+        else:
+            _neutral(f"거래량 {vol_ratio:.1f}배", "평균 수준 (중립)")
+
+        # 52주 신고가권
+        if near_high:
+            _add(f"52주 위치 {pos52:.0f}%", "신고가권 → 모멘텀 지속 가능성", +1, "high52w")
+        else:
+            _neutral(f"52주 위치 {pos52:.0f}%", "신고가 미도달 (중립)")
+
+        buy_score  = round(buy_score, 2)
+        sell_score = round(sell_score, 2)
+
+        # ── 종합 진단 ────────────────────────────────────────────────────────
+        synth = pd.Series({
+            "매수신호":    round(buy_score),
+            "매도신호":    round(sell_score),
+            "RSI(14)":    rsi_val,
+            "RSI다이버전스": divergence,
+        })
+        entry, hold = position_guidance(synth)
+
+        # 코멘트
+        parts = []
+        if not trending:
+            parts.append(f"ADX {adx_val:.0f} 횡보장 — RSI 신호 신뢰도 낮음")
+        elif adx_val >= 30:
+            parts.append(f"ADX {adx_val:.0f} 강한 추세 진행 중")
+        if rsi_val > 70:
+            parts.append(f"RSI {rsi_val:.1f} 과매수")
+        elif rsi_val < 30:
+            parts.append(f"RSI {rsi_val:.1f} 과매도")
+        if bb_pct > 100:
+            parts.append(f"BB {bb_pct:.0f}% 상단 이탈 — 단기 과열")
+        elif bb_pct < 0:
+            parts.append(f"BB {bb_pct:.0f}% 하단 이탈 — 단기 과매도")
+        if high_vol:
+            parts.append(f"거래량 {vol_ratio:.1f}배 {'상승' if pd.notna(ret_1w) and ret_1w > 0 else '하락'} 동반")
+        if divergence != "-":
+            parts.append(f"RSI 다이버전스 {divergence}")
+        comment = " / ".join(parts) if parts else "신호 혼재 — 방향 불명확"
+
+        return {
+            "is_korean":   is_korean,
+            "price":       price,
+            "ret_1w":      _ret(5),
+            "ret_1m":      _ret(22),
+            "ret_3m":      _ret(63),
+            "ret_6m":      _ret(126),
+            "ret_1y":      _ret(252) if len(close) >= 252 else round((price / float(close.iloc[0]) - 1) * 100, 1),
+            "high52":      high52,
+            "low52":       low52,
+            "pos52":       pos52,
+            "near_high":   near_high,
+            "rsi_val":     round(rsi_val, 1),
+            "rsi_delta":   rsi_delta,
+            "divergence":  divergence,
+            "macd_hist":   macd_hist,
+            "bb_pct":      bb_pct,
+            "bb_low":      round(bb_low, 1),
+            "bb_mid":      round(bb_mid, 1),
+            "bb_high":     round(bb_high, 1),
+            "sma20":       round(sma20, 1),
+            "sma50":       round(sma50, 1),
+            "sma200":      round(sma200, 1),
+            "adx_val":     round(adx_val, 1),
+            "adx_pos":     round(adx_pos, 1),
+            "adx_neg":     round(adx_neg, 1),
+            "trending":    trending,
+            "vol_ratio":   vol_ratio,
+            "obv_rising":  obv_rising,
+            "atr_val":     round(atr_val, 1),
+            "atr_pct":     atr_pct,
+            "buy_score":   buy_score,
+            "sell_score":  sell_score,
+            "signal_rows": signal_rows,
+            "entry":       entry,
+            "hold":        hold,
+            "comment":     comment,
+        }
+    except Exception:
+        return None
+
+
+def tab_checkup(phase: str | None) -> None:
+    effective_phase = phase or "경계"
+    color = PHASE_COLORS[effective_phase]
+    st.markdown(
+        f"<div style='padding:10px 14px;background:{color}18;border-left:4px solid {color};"
+        f"border-radius:6px;margin-bottom:16px;'>"
+        f"현재 국면 <b style='color:{color}'>{effective_phase}</b> 기준 신호 가중치 적용"
+        + ("" if phase else " &nbsp;—&nbsp; 시장 개요 탭을 먼저 로드하면 자동 갱신됩니다")
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    col_inp, col_btn = st.columns([5, 1])
+    with col_inp:
+        ticker_raw = st.text_input(
+            "ticker",
+            placeholder="미국: AAPL · NVDA · TSLA    한국: 005380 · 005930 · 000660",
+            label_visibility="collapsed",
+        )
+    with col_btn:
+        run = st.button("검진 시작", use_container_width=True)
+
+    st.caption("한국 종목은 6자리 숫자 코드 입력 (예: 005930 = 삼성전자, 005380 = 현대차)")
+
+    if not run or not ticker_raw.strip():
+        st.info("종목 코드를 입력 후 [검진 시작] 버튼을 누르세요.")
+        return
+
+    ticker_input = ticker_raw.strip()
+    with st.spinner(f"{ticker_input} 분석 중..."):
+        r = compute_checkup(ticker_input, effective_phase)
+
+    if r is None:
+        st.error(f"**{ticker_input}** 데이터를 불러올 수 없습니다. 종목 코드를 확인해주세요.")
+        return
+
+    is_kr = r["is_korean"]
+
+    def fmt_p(v: float) -> str:
+        return f"{v:,.0f}원" if is_kr else f"${v:,.2f}"
+
+    def fmt_ret(v: float) -> str:
+        return f"{v:+.1f}%" if pd.notna(v) else "-"
+
+    # ── 1. 가격 현황 ──────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown(f"### {ticker_input.upper()} 검진 결과")
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("현재가", fmt_p(r["price"]))
+    c2.metric("1주", fmt_ret(r["ret_1w"]))
+    c3.metric("1개월", fmt_ret(r["ret_1m"]))
+    c4.metric("3개월", fmt_ret(r["ret_3m"]))
+    c5.metric("6개월", fmt_ret(r["ret_6m"]))
+    c6.metric("1년", fmt_ret(r["ret_1y"]))
+
+    pos52 = r["pos52"]
+    filled = int(pos52 / 10)
+    bar = "▓" * filled + "░" * (10 - filled)
+    h_fmt = f"{r['high52']:,.0f}" if is_kr else f"{r['high52']:,.2f}"
+    l_fmt = f"{r['low52']:,.0f}" if is_kr else f"{r['low52']:,.2f}"
+    st.markdown(
+        f"**52주 구간** &nbsp; 최저 `{l_fmt}` &nbsp; {bar} &nbsp; 최고 `{h_fmt}` "
+        f"&nbsp; 현재 위치 **{pos52:.0f}%**"
+        + (" &nbsp; ⚡ **52주 신고가권**" if r["near_high"] else "")
+    )
+
+    # ── 2. 기술 신호 테이블 ───────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown(f"#### 기술 신호 &nbsp; `{effective_phase}` 국면 가중치 적용")
+
+    if not r["trending"]:
+        st.warning(f"ADX {r['adx_val']:.1f} — **횡보장** 감지. RSI 극단 신호(과매수/과매도) 가중치 50% 하향 적용됨.")
+
+    sig_df = pd.DataFrame(
+        r["signal_rows"],
+        columns=["신호", "해석", "원점수", "가중치", "가중점수"],
+    )
+
+    def _color_sig(row: pd.Series) -> list[str]:
+        if row["원점수"] == 1:
+            return ["background-color:#0d3b1f"] * len(row)
+        if row["원점수"] == -1:
+            return ["background-color:#3b0d0d"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(
+        sig_df.style.apply(_color_sig, axis=1),
+        use_container_width=True, hide_index=True,
+    )
+
+    di_dir = "DI+ 우세 (상승 추세)" if r["adx_pos"] > r["adx_neg"] else "DI- 우세 (하락 추세)"
+    trend_label = "추세장 ✓" if r["trending"] else "횡보장 ⚠"
+    st.caption(
+        f"ADX {r['adx_val']:.1f} ({trend_label}) | {di_dir} "
+        f"(DI+ {r['adx_pos']:.1f} / DI- {r['adx_neg']:.1f})"
+    )
+
+    # ── 3. 보조 지표 ──────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### 보조 지표 (정보용 — 점수 미포함)")
+
+    b1, b2, b3, b4 = st.columns(4)
+    b1.metric(
+        "OBV 추세",
+        "📈 상승 (매집)" if r["obv_rising"] else "📉 하락 (분산)",
+    )
+    atr_str = f"{r['atr_val']:,.0f}원" if is_kr else f"{r['atr_val']:.2f}"
+    b2.metric("ATR — 일 변동폭", f"{atr_str} ({r['atr_pct']:.1f}%)")
+    b3.metric(
+        "볼린저 위치",
+        f"{r['bb_pct']:.0f}%",
+        "상단 이탈 과열" if r["bb_pct"] > 100 else (
+            "하단 이탈 과매도" if r["bb_pct"] < 0 else "밴드 내 정상"),
+        delta_color="inverse" if r["bb_pct"] > 100 else (
+            "normal" if r["bb_pct"] < 0 else "off"),
+    )
+    b4.metric("SMA20", f"{r['sma20']:,.0f}" if is_kr else f"{r['sma20']:.2f}",
+              "위 ↑" if r["price"] > r["sma20"] else "아래 ↓")
+
+    # ── 4. 종합 진단 ──────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### 종합 진단")
+
+    g1, g2, g3, g4 = st.columns(4)
+    g1.metric("가중 매수점수", f"{r['buy_score']:.1f}",
+              "≥3.0 진입 고려" if r["buy_score"] >= 3.0 else "3.0 미달")
+    g2.metric("가중 매도점수", f"{r['sell_score']:.1f}",
+              "≥3.0 경계 요망" if r["sell_score"] >= 3.0 else "3.0 미달",
+              delta_color="inverse")
+    g3.metric("신규진입 판단", r["entry"])
+    g4.metric("보유 판단", r["hold"])
+
+    entry_color = {
+        "✅ 진입 적합":      "#00C851",
+        "⏳ 조정 후 진입":   "#FFD700",
+        "🔍 분할 매수 검토": "#00D4FF",
+        "⛔ 진입 보류":      "#FF3547",
+        "👀 관망":           "#888888",
+    }.get(r["entry"], "#888888")
+
+    st.markdown(
+        f"<div style='padding:12px 16px;background:{entry_color}18;"
+        f"border-left:4px solid {entry_color};border-radius:6px;margin-top:8px;'>"
+        f"<b>진단 요약:</b> {r['comment']}</div>",
+        unsafe_allow_html=True,
+    )
+
+    if r["divergence"] != "-":
+        st.info(f"**RSI 다이버전스**: {r['divergence']} — 추세 전환/지속 선행 신호 감지")
+
+    # ── 5. 한국 종목 수급 ─────────────────────────────────────────────────────
+    if is_kr:
+        st.markdown("---")
+        st.markdown("#### 외국인/기관 순매매 (최근 5일)")
+        code = ticker_input.zfill(6)
+        with st.spinner("수급 데이터 조회 중..."):
+            flow = fetch_investor_flow(code)
+
+        if flow is not None and not flow.empty:
+            fgn_5d = int(flow["외국인순매매량"].sum())
+            ins_5d = int(flow["기관순매매량"].sum())
+            f1, f2 = st.columns(2)
+            f1.metric("외국인 5일 누계", f"{fgn_5d:+,}",
+                      "순매수 ↑" if fgn_5d > 0 else "순매도 ↓",
+                      delta_color="normal" if fgn_5d > 0 else "inverse")
+            f2.metric("기관 5일 누계", f"{ins_5d:+,}",
+                      "순매수 ↑" if ins_5d > 0 else "순매도 ↓",
+                      delta_color="normal" if ins_5d > 0 else "inverse")
+
+            def _color_flow(row: pd.Series) -> list[str]:
+                return [
+                    ("color:#00C851" if row[c] > 0 else "color:#FF3547")
+                    if c in ("기관순매매량", "외국인순매매량") else ""
+                    for c in row.index
+                ]
+            st.dataframe(flow.style.apply(_color_flow, axis=1), use_container_width=True)
+        else:
+            st.info("외국인/기관 수급 데이터를 불러올 수 없습니다.")
 
 
 def signal_legend() -> None:
@@ -1487,7 +1937,7 @@ Claude Code에서 요청:
 
     st.title("📊 글로벌 시장 분석 대시보드")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["🌐 시장 개요", "🇺🇸 미국장", "🇰🇷 한국장", "📈 매수/매도 추천"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🌐 시장 개요", "🇺🇸 미국장", "🇰🇷 한국장", "📈 매수/매도 추천", "🔍 종목 검진"])
 
     phase: str | None = None
     top10 = pd.DataFrame()
@@ -1505,6 +1955,10 @@ Claude Code에서 요청:
 
     with tab4:
         tab_recommendations(phase, top10, kr_tech, kr_extra)
+
+    with tab5:
+        st.subheader("종목 검진")
+        tab_checkup(phase)
 
 
 if __name__ == "__main__":
