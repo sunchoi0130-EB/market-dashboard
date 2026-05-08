@@ -382,6 +382,7 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
     for ticker in tickers:
         try:
             hist = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True)
+            hist = hist.dropna(subset=["Close", "High", "Low", "Volume"])
             if len(hist) < 52:
                 continue
             close      = hist["Close"]
@@ -888,6 +889,7 @@ def compute_checkup(ticker_input: str, phase: str) -> dict | None:
     yf_ticker = f"{ticker_input}.KS" if is_korean else ticker_input.upper()
     try:
         hist = yf.Ticker(yf_ticker).history(period="1y", interval="1d", auto_adjust=True)
+        hist = hist.dropna(subset=["Close", "High", "Low", "Volume"])
         if len(hist) < 60:
             return None
         close  = hist["Close"]
