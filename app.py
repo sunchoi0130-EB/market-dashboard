@@ -2731,15 +2731,12 @@ def render_watchlist_status() -> None:
     if not wl:
         return
 
-    us_tickers = tuple(t for t in wl if not (t.endswith(".KS") or t.endswith(".KQ")))
-    kr_tickers = tuple(t for t in wl if t.endswith(".KS") or t.endswith(".KQ"))
-
+    # 종목별 개별 호출 — 추가 시 기존 캐시 유지, 신규 종목만 별도 fetch
     frames = []
-    for tup in [us_tickers, kr_tickers]:
-        if tup:
-            df = fetch_technical_signals(tup)
-            if not df.empty:
-                frames.append(df)
+    for ticker in wl:
+        df = fetch_technical_signals((ticker,))
+        if not df.empty:
+            frames.append(df)
     if not frames:
         return
 
