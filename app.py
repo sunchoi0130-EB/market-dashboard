@@ -2812,8 +2812,16 @@ def main() -> None:
     if "custom_watchlist" not in st.session_state:
         _wp = st.query_params.get("watch", "")
         st.session_state["custom_watchlist"] = [t for t in _wp.split(",") if t.strip()] if _wp else []
-    if "_cwl_key" not in st.session_state:
-        st.session_state["_cwl_key"] = 0
+
+    def _add_ticker_cb() -> None:
+        raw = st.session_state.get("cwl_add_input", "").strip().upper()
+        if not raw:
+            return
+        parsed = f"{raw.zfill(6)}.KS" if raw.isdigit() else raw
+        wl = st.session_state.setdefault("custom_watchlist", [])
+        if parsed not in wl:
+            wl.append(parsed)
+        st.session_state["cwl_add_input"] = ""   # 입력창 초기화
 
     with st.sidebar:
         st.markdown("## 글로벌 시장 분석")
@@ -2841,19 +2849,13 @@ def main() -> None:
         st.markdown("**내 관심종목**")
         st.caption("입력 후 Enter로 추가. 미국: NVDA / 한국: 005930")
 
-        _new_t = st.text_input(
+        st.text_input(
             "추가",
             placeholder="NVDA 또는 005930",
             label_visibility="collapsed",
-            key=f"cwl_input_{st.session_state['_cwl_key']}",
+            key="cwl_add_input",
+            on_change=_add_ticker_cb,
         )
-        if _new_t.strip():
-            _t2 = _new_t.strip().upper()
-            _parsed2 = f"{_t2.zfill(6)}.KS" if _t2.isdigit() else _t2
-            if _parsed2 not in st.session_state["custom_watchlist"]:
-                st.session_state["custom_watchlist"].append(_parsed2)
-            st.session_state["_cwl_key"] += 1
-            st.rerun()
 
         _wl = st.session_state["custom_watchlist"]
         if _wl:
