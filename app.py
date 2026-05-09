@@ -1219,9 +1219,9 @@ def compute_checkup(ticker_input: str, phase: str) -> dict | None:
 
         parts = []
         if not trending:
-            parts.append(f"ADX {adx_val:.0f} 횡보장 — 추세 신호 신뢰도 낮음")
+            parts.append(f"ADX {adx_val:.0f} 횡보장 — SMA·MACD·Ichimoku 등 추세 추종 신호 위신호 주의")
         elif adx_val >= 30:
-            parts.append(f"ADX {adx_val:.0f} 강한 추세")
+            parts.append(f"ADX {adx_val:.0f} 강한 추세 — 추세 추종 신호 신뢰도 높음")
         if ws:
             parts.append(f"Weinstein {weinstein_label.split(' — ')[0]}")
         if rsi_val > 70:
@@ -1440,13 +1440,19 @@ def tab_checkup(phase: str | None) -> None:
 | **Ichimoku 구름** | 가격이 구름 위 = 강세, 구름 아래 = 약세, 구름 안 = 불명 |
 | **MFI** | 거래량 반영 RSI. 80 초과 = 자금 이탈, 20 미만 = 자금 유입 |
 
-**ADX** — 추세 강도 (점수 미포함, 신뢰도 참고용). 25 이상 = 추세장, 미만 = 횡보장.
+**ADX** — 추세 강도 (점수 미포함, 신뢰도 참고용). 방향이 아닌 **강도**를 측정. 25 이상 = 추세장(신호 신뢰↑), 25 미만 = 횡보장(가격이 일정 범위 안에서 등락, 추세 추종 신호 위험↑).
 
 **Weinstein Stage** — 30주(150일) MA 기반 4단계. Stage 2(상승 추세)가 진입 적합 구간.
         """)
 
     if not r["trending"]:
-        st.warning(f"ADX {r['adx_val']:.1f} — **횡보장** 감지. 개별 신호 신뢰도가 낮을 수 있습니다.")
+        st.warning(
+            f"**ADX {r['adx_val']:.1f} — 횡보장.** "
+            f"가격이 뚜렷한 방향 없이 일정 범위 안에서 등락하는 구간입니다. "
+            f"이때 SMA·MACD·Ichimoku 같은 **추세 추종 신호는 위신호(false signal)가 잦아** 신뢰도가 떨어집니다. "
+            f"RSI·볼린저밴드처럼 과매수/과매도를 보는 **평균회귀 신호는 상대적으로 유효**합니다. "
+            f"매수·매도 신호 개수보다 신호 종류를 함께 확인하세요."
+        )
 
     sig_df = pd.DataFrame(r["signal_rows"], columns=["신호", "해석", "방향"])
 
