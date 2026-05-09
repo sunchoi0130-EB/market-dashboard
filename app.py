@@ -1625,19 +1625,28 @@ def tab_checkup(phase: str | None) -> None:
         "Weinstein Stage 2 + 매수신호 ≥ 3 조합이 가장 선호되는 진입 조건입니다."
     )
 
-    g1, g2, g3, g4 = st.columns(4)
+    g1, g2, g3, g4, g5 = st.columns(5)
     g1.metric("매수신호", f"{r['buy_score']}개",
-              "✓ 3개 이상 — 진입 고려" if r["buy_score"] >= 3 else "3개 미달")
+              "✓ 6개 이상 — 진입 고려" if r["buy_score"] >= 6 else "6개 미달")
     g2.metric("매도신호", f"{r['sell_score']}개",
-              "⚠ 3개 이상 — 경계 요망" if r["sell_score"] >= 3 else "3개 미달",
+              "⚠ 7개 이상 — 경계 요망" if r["sell_score"] >= 7 else "7개 미달",
               delta_color="inverse")
     g3.metric("신규진입 판단", r["entry"])
     g4.metric("보유 판단", r["hold"])
 
+    div_val = r["divergence"]
+    div_delta = {
+        "🟢 일반강세":   "반등 선행 신호",
+        "🔴 일반약세":   "조정 선행 신호",
+        "🔵 숨겨진강세": "상승 추세 지속",
+        "🟠 숨겨진약세": "하락 추세 지속",
+    }.get(div_val, "감지 없음 (추세 유효)")
+    g5.metric("RSI 다이버전스", div_val if div_val != "-" else "—", div_delta)
+
     st.caption(
         "신규진입: 지금 처음 사는 경우의 타이밍 판단. "
         "보유판단: 이미 보유 중인 경우 매도/유지 판단. "
-        "같은 종목이라도 두 판단이 다를 수 있습니다."
+        "RSI다이버전스: 가격·RSI 방향이 엇갈릴 때 추세 전환/지속 선행 신호."
     )
 
     entry_color = {
@@ -1654,9 +1663,6 @@ def tab_checkup(phase: str | None) -> None:
         f"<b>진단 요약:</b> {r['comment']}</div>",
         unsafe_allow_html=True,
     )
-
-    if r["divergence"] != "-":
-        st.info(f"**RSI 다이버전스**: {r['divergence']} — 추세 전환/지속 선행 신호 감지")
 
     # ── 5. 한국 종목 수급 ─────────────────────────────────────────────────────
     if is_kr:
