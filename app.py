@@ -2726,7 +2726,7 @@ Claude가 웹 검색으로 현재 시황·뉴스·섹터 흐름을 파악한 후
 
 
 def render_watchlist_status() -> None:
-    """내 관심종목 전체를 신호 강도와 무관하게 항상 표시."""
+    """내 관심종목 전체를 신호 강도와 무관하게 카드 형태로 표시."""
     wl = st.session_state.get("custom_watchlist", [])
     if not wl:
         return
@@ -2740,7 +2740,6 @@ def render_watchlist_status() -> None:
             df = fetch_technical_signals(tup)
             if not df.empty:
                 frames.append(df)
-
     if not frames:
         return
 
@@ -2754,48 +2753,52 @@ def render_watchlist_status() -> None:
         "⏳ 조정 후 진입":   "#FFD700",
         "🔍 분할 매수 검토": "#00D4FF",
         "⛔ 진입 보류":      "#FF3547",
-        "👀 관망":           "#888888",
+        "👀 관망":           "#555555",
+    }
+    _bg_map = {
+        "✅ 진입 적합":      "#00C85112",
+        "⏳ 조정 후 진입":   "#FFD70012",
+        "🔍 분할 매수 검토": "#00D4FF12",
+        "⛔ 진입 보류":      "#FF354712",
+        "👀 관망":           "#1A1F2E",
     }
 
     def _wl_name(ticker: str) -> str:
         base = ticker.replace(".KS", "").replace(".KQ", "")
         return TICKER_NAMES.get(base, KR_CLAUDE_PICK_NAMES.get(base, base))
 
-    rows_html = ""
+    cards_html = ""
     for _, row in all_df.iterrows():
-        buy  = int(row["매수신호"])
-        sell = int(row["매도신호"])
+        buy   = int(row["매수신호"])
+        sell  = int(row["매도신호"])
         entry = row["신규진입"]
         ret1m = row.get("1개월(%)", float("nan"))
-        bc = "#00C851" if buy  >= 6 else "#FAFAFA"
-        sc = "#FF3547" if sell >= 7 else "#FAFAFA"
-        ec = _ec_map.get(entry, "#888888")
-        rc = ("#00C851" if ret1m > 0 else "#FF3547") if pd.notna(ret1m) else "#aaa"
+        ec  = _ec_map.get(entry, "#555555")
+        bg  = _bg_map.get(entry, "#1A1F2E")
+        bc  = "#00C851" if buy  >= 6 else "#aaa"
+        sc  = "#FF3547" if sell >= 7 else "#aaa"
+        rc  = ("#00C851" if ret1m > 0 else "#FF3547") if pd.notna(ret1m) else "#555"
         ret_str = f"{ret1m:+.1f}%" if pd.notna(ret1m) else "—"
-        rows_html += (
-            f"<tr style='border-top:1px solid #2a2f3d'>"
-            f"<td style='padding:6px 6px 6px 0;font-weight:600;font-size:0.82rem'>{_wl_name(str(row['티커']))}</td>"
-            f"<td style='padding:6px 4px;text-align:center;color:{bc};font-weight:700'>{buy}</td>"
-            f"<td style='padding:6px 4px;text-align:center;color:{sc};font-weight:700'>{sell}</td>"
-            f"<td style='padding:6px 4px;color:{ec};font-size:0.75rem'>{entry}</td>"
-            f"<td style='padding:6px 0 6px 4px;text-align:right;color:{rc};font-size:0.8rem'>{ret_str}</td>"
-            f"</tr>"
+        name = _wl_name(str(row["티커"]))
+        cards_html += (
+            f"<div style='flex:1;min-width:140px;max-width:220px;"
+            f"background:{bg};border-left:4px solid {ec};"
+            f"border-radius:7px;padding:11px 14px;'>"
+            f"<div style='font-size:0.88rem;font-weight:700;margin-bottom:7px;color:#FAFAFA'>{name}</div>"
+            f"<div style='font-size:0.7rem;color:#aaa;margin-bottom:3px'>"
+            f"매수 <span style='color:{bc};font-weight:700;font-size:0.82rem'>{buy}</span>"
+            f" &nbsp;·&nbsp; "
+            f"매도 <span style='color:{sc};font-weight:700;font-size:0.82rem'>{sell}</span></div>"
+            f"<div style='font-size:0.75rem;color:{ec};font-weight:600;margin-bottom:5px'>{entry}</div>"
+            f"<div style='font-size:0.7rem;color:{rc}'>1개월 {ret_str}</div>"
+            f"</div>"
         )
 
     st.markdown(
-        f"<div style='background:#1A1F2E;border-radius:8px;padding:12px 16px;margin:6px 0'>"
-        f"<div style='color:#aaa;font-size:0.7rem;margin-bottom:8px'>👁 내 관심종목 현황 ({len(all_df)}개)"
-        f"  <span style='color:#555;font-size:0.65rem'>— 매수/매도 신호 개수 · 진입 판단 · 1개월 수익률</span></div>"
-        f"<table style='width:100%;border-collapse:collapse'>"
-        f"<thead><tr style='color:#555;font-size:0.67rem'>"
-        f"<th style='text-align:left;padding:0 0 6px 0'>종목</th>"
-        f"<th style='text-align:center;padding:0 4px 6px'>매수</th>"
-        f"<th style='text-align:center;padding:0 4px 6px'>매도</th>"
-        f"<th style='text-align:left;padding:0 4px 6px'>진입 판단</th>"
-        f"<th style='text-align:right;padding:0 0 6px 4px'>1개월</th>"
-        f"</tr></thead>"
-        f"<tbody>{rows_html}</tbody>"
-        f"</table></div>",
+        f"<div style='margin:6px 0 2px 0;color:#aaa;font-size:0.72rem'>👁 내 관심종목 현황</div>"
+        f"<div style='display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px'>"
+        + cards_html +
+        f"</div>",
         unsafe_allow_html=True,
     )
 
