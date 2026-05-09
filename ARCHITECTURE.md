@@ -1,7 +1,7 @@
 # 글로벌 시장 분석 대시보드 — 아키텍처 문서
 
 > 저장소: `github.com/sunchoi0130-EB/market-dashboard`  
-> 배포: Streamlit Cloud (Python 3.14, uv 패키지 매니저)  
+> 배포: Streamlit Cloud (Python 3.11)  
 > 로컬 개발: macOS, Python 3.9.6
 
 ---
@@ -10,11 +10,12 @@
 
 ```
 market-dashboard/
-├── app.py                  # 전체 앱 (단일 파일, ~840줄)
-├── requirements.txt        # 의존성 패키지 (버전 핀 최소화)
-├── runtime.txt             # python-3.11 (Streamlit Cloud 힌트용, 실제 3.14 사용)
+├── app.py                  # 전체 앱 (단일 파일, ~2,440줄)
+├── requirements.txt        # 의존성 패키지
+├── runtime.txt             # python-3.11 (Streamlit Cloud 힌트)
+├── ARCHITECTURE.md
 ├── .streamlit/
-│   └── config.toml         # 다크 테마, 포트 설정
+│   └── config.toml         # 다크 테마, 포트 8501
 └── .gitignore
 ```
 
@@ -22,26 +23,32 @@ market-dashboard/
 
 ## 2. 데이터 소스 및 캐시 전략
 
-| 데이터 | 소스 | 캐시 TTL | 함수 |
+| 데이터 | 소스 | TTL | 함수 |
 |---|---|---|---|
-| 공포탐욕지수 (7개 세부지표) | CNN Markets API (직접 호출) | 1시간 | `fetch_fear_greed()` |
-| VIX, 10Y금리, 2Y금리, DXY | yfinance (`^VIX`, `^TNX`, `^IRX`, `DX-Y.NYB`) | 15분 | `fetch_macro_data()` |
-| S&P500 vs 200일선 | yfinance (`^GSPC`, 1년 일봉) | 5분 | `fetch_sp500_ma()` |
-| 미국 주요 지수 5개 | yfinance (5일 일봉) | 5분 | `fetch_us_indices()` |
-| SPDR 섹터 ETF 11개 | yfinance (1개월 일봉) | 5분 | `fetch_sector_performance()` |
-| 기술분석 신호 (미국/한국) | yfinance (1년 일봉, 개별 ticker) | 5분 | `fetch_technical_signals()` |
-| KOSPI / KOSDAQ 지수 | FinanceDataReader (`KS11`, `KQ11`) | 10분 | `fetch_korean_indices()` |
-| KOSPI 시총 상위 10 | FinanceDataReader `StockListing("KOSPI")` | 10분 | `fetch_kospi_top10()` |
-| 외국인/기관 순매매 | FinanceDataReader `SnapDataReader("NAVER/INVESTORS/코드")` | 10분 | `fetch_investor_flow()` |
+| 공포탐욕지수 (7개 세부지표) | CNN Markets API (직접 호출) | 3600s | `fetch_fear_greed()` |
+| VIX, 10Y·2Y금리, DXY + VIX 방향 | yfinance (3개월 일봉) | 900s | `fetch_macro_data()` |
+| S&P500 vs 200일선 | yfinance (1년 일봉) | 300s | `fetch_sp500_ma()` |
+| S&P500 1·3·12개월 수익률 | yfinance | 3600s | `fetch_sp500_returns()` |
+| 미국 주요 지수 5개 + 분봉 현재가 | yfinance (분봉 1m 오버레이) | 60s | `fetch_us_indices()` |
+| SPDR 섹터 ETF 11개 | yfinance (1개월 일봉) | 300s | `fetch_sector_performance()` |
+| 기술분석 신호 10개 (미국/한국) | yfinance (1년 일봉) | 300s | `fetch_technical_signals()` |
+| 주봉 RSI(14) | yfinance (2년 주봉) | 3600s | `fetch_weekly_rsi()` |
+| 분봉 현재가 (미국/한국) | yfinance (1d, 1m 인터벌) | 60s | `fetch_realtime_prices()` |
+| KOSPI / KOSDAQ 지수 | FinanceDataReader (`KS11`, `KQ11`) | 600s | `fetch_korean_indices()` |
+| KOSPI 시총 상위 10 | FinanceDataReader `StockListing("KOSPI")` | 600s | `fetch_kospi_top10()` |
+| 한국 종목 현재가 | FinanceDataReader | 600s | `fetch_korean_prices_fdr()` |
+| 외국인/기관 순매매 | FinanceDataReader `SnapDataReader("NAVER/INVESTORS/...")` | 600s | `fetch_investor_flow()` |
+| 단일 종목 종합 검진 | yfinance + yf.info (Quality) | 300s | `compute_checkup()` |
+| 티커 검색 (코드·이름 모두) | 하드코딩 딕셔너리 + yfinance fallback | 3600s | `resolve_ticker()` |
 
-### 중요 설계 결정사항
+### 주요 설계 결정
 
-- **공포탐욕 패키지 미사용**: `fear-greed` PyPI 패키지는 Python 3.9에서 `str | None` 타입힌트 버그로 import 불가. CNN API를 `requests`로 직접 호출하여 동일한 데이터 획득.
-- **pandas-ta 미사용**: PyPI에 존재하지 않음. `ta==0.11.0` 패키지로 대체 (RSIIndicator, SMAIndicator).
-- **yfinance 버전 고정 0.2.66**: 1.x는 `curl_cffi>=0.15` 요구 → Python 3.9에서 최대 0.13.0만 설치 가능하여 충돌. 0.2.66은 `curl_cffi>=0.7`만 요구.
-- **streamlit 버전 미핀**: Streamlit Cloud는 자체 관리 버전 사용. requirements.txt에 핀하면 Python 3.14 환경에서 컴파일 시도 → 빌드 타임아웃.
-- **한국 종목 fallback**: `fdr.StockListing("KOSPI")`가 클라우드에서 실패할 경우 KOSPI 시총 상위 10 하드코딩 사용.
-- **한국 기술분석**: yfinance `.KS` 접미사 사용 (예: `005930.KS`). fdr 코드 → yfinance 티커 변환 필요.
+- **공포탐욕 패키지 미사용**: `fear-greed` PyPI 패키지가 `str | None` 타입힌트 버그로 Python 3.9에서 import 불가. CNN API를 `requests`로 직접 호출.
+- **pandas-ta 미사용**: PyPI 존재하지 않음. `ta==0.11.0`으로 대체.
+- **yfinance 버전 고정 0.2.66**: 1.x는 `curl_cffi>=0.15` 요구 → Python 3.9 충돌. 0.2.66은 0.7만 요구.
+- **streamlit 버전 미핀**: Streamlit Cloud 자체 관리. requirements.txt에 핀하면 빌드 타임아웃 발생.
+- **tuple 인자 강제**: `@st.cache_data`는 list를 캐시 키로 사용 불가 → 모든 tickers 인자를 `tuple[str, ...]`로 통일.
+- **분봉 현재가 fallback**: 장 마감·데이터 없으면 일봉 종가로 자동 대체.
 
 ---
 
@@ -50,340 +57,239 @@ market-dashboard/
 ```
 app.py
 ├── [상수 블록]
-│   ├── CNN_FG_URL, CNN_HEADERS         # Fear & Greed API 엔드포인트
-│   ├── US_INDICES                       # 지수 티커 → 한글명 매핑
-│   ├── SECTOR_ETFS                      # 11개 SPDR 섹터 ETF → 한글 섹터명
+│   ├── CNN_FG_URL, CNN_HEADERS
+│   ├── US_INDICES                       # 지수 티커 → 한글명
+│   ├── SECTOR_ETFS                      # 11개 SPDR ETF → 섹터명
 │   ├── WATCHLIST                        # 미국 워치리스트 10종목
-│   ├── TICKER_NAMES                     # 티커 → 종목명 (워치리스트 + 섹터 ETF)
-│   ├── KOSPI_FALLBACK                   # 한국 시총 상위 10 하드코딩 (fallback)
-│   ├── PHASE_COLORS / SUMMARIES         # 국면별 색상·요약 문구
-│   ├── PHASE_SECTORS                    # 국면별 섹터 로테이션 룰 (하드코딩)
-│   ├── FG_INDICATOR_NAMES               # 7개 세부지표 영어키 → 한글명
-│   └── FG_RATING_KR                     # Fear/Greed 등급 영어 → 한글
+│   ├── TICKER_NAMES                     # 티커 → 종목명 전체 매핑
+│   ├── US_CLAUDE_PICKS                  # 섹터별 Claude 추천 미국 종목
+│   ├── KR_CLAUDE_PICKS                  # 섹터별 Claude 추천 한국 종목
+│   ├── KOSPI_FALLBACK                   # 시총 상위 10 하드코딩 (API 실패 시)
+│   ├── PHASE_COLORS / SUMMARIES         # 6개 국면별 색상·요약 문구
+│   ├── PHASE_SECTORS                    # 국면별 섹터 로테이션 룰
+│   ├── TECH_COL_FMT                     # 테이블 컬럼 포맷 딕셔너리
+│   └── FG_INDICATOR_NAMES / RATING_KR   # F&G 세부지표 한글 매핑
 │
-├── [데이터 패처] (모두 @st.cache_data 적용)
-│   ├── fetch_fear_greed()               # TTL 3600s
-│   ├── fetch_macro_data()               # TTL 900s
-│   ├── fetch_sp500_ma()                 # TTL 300s
-│   ├── fetch_us_indices()               # TTL 300s
-│   ├── fetch_sector_performance()       # TTL 300s
-│   ├── fetch_technical_signals(tickers) # TTL 300s, tuple 인자 (hashable)
-│   ├── fetch_korean_indices()           # TTL 600s
-│   ├── fetch_kospi_top10()              # TTL 600s
-│   └── fetch_investor_flow(code)        # TTL 600s
+├── [데이터 패처] (@st.cache_data 일괄 적용)
+│   └── (위 섹션 2 참조)
+│
+├── [분석 헬퍼]
+│   ├── weinstein_stage(close)           # 150일 SMA + 방향 → Stage 1~4
+│   ├── detect_rsi_divergence(hist, rsi) # 63봉 스윙 피봇 기반 4종 다이버전스
+│   ├── rsi_context(rsi, delta)          # RSI 구간 + 5일 방향 → 문장
+│   └── add_relative_strength(df, sp)   # 1·3·12M 수익률 - S&P500 수익률
 │
 ├── [국면 판정]
-│   └── determine_phase(fg, vix, spread, sp_above) → str
-│       # 우선순위: 공포 > 강세 > 조정 > 경계 (default)
+│   └── determine_phase(fg, vix, spread, sp_above, vix_falling) → str
 │
 ├── [UI 헬퍼]
 │   ├── phase_badge(phase)               # 국면 대형 배지 (HTML)
-│   ├── highlight_signals(row)           # 테이블 행 배경색 (초록/빨강)
-│   ├── signal_legend()                  # 신호 설명 expander
+│   ├── highlight_signals(row)           # 행 배경색 (≥5=연색, ≥6=진색)
+│   ├── position_guidance(row)           # 신규진입·보유판단 레이블
+│   ├── signal_legend()                  # 10개 신호 설명 expander
 │   └── fg_guide()                       # 공포탐욕지수 해석 expander
 │
 ├── [탭 렌더러]
-│   ├── tab_overview() → phase: str|None
+│   ├── tab_overview()         → phase: str|None
 │   ├── tab_us(phase)
-│   ├── tab_korea() → (top10, kr_tech): tuple[DataFrame, DataFrame]
-│   └── tab_recommendations(phase, top10, kr_tech)
+│   ├── tab_korea()            → (top10, kr_tech, kr_extra): tuple[DF, DF, DF]
+│   ├── tab_checkup(phase)     # 단일 종목 종합 검진
+│   └── tab_recommendations(phase, top10, kr_tech, kr_extra)
 │
 └── main()
-    # set_page_config → sidebar → 4탭 순서대로 렌더링
-    # phase, top10, kr_tech를 탭 간 공유 (세션스테이트 대신 변수 전달)
+    # set_page_config → sidebar → 5탭 순서대로 렌더링
+    # phase, top10, kr_tech, kr_extra를 탭 간 변수로 공유
 ```
 
 ---
 
-## 4. 국면 판정 로직
+## 4. 국면 판정 로직 (6단계)
 
-```python
-# 우선순위 순서로 평가
-if vix >= 40 and fg_score < 20:          → "공포"
-if fg >= 50 and vix < 20 and spread >= 0
-   and sp_above_200ma:                    → "강세"
-if fg < 30 and (30 <= vix <= 40):        → "조정"
-if fg < 30 and not sp_above_200ma:       → "조정"
-else:                                     → "경계"  # default
+**입력 지표 5개**: 공포탐욕점수, VIX, 10Y-2Y 금리차, S&P500 vs 200일선, VIX 방향(5d MA vs 20d MA)
+
+```
+우선순위 순서로 평가:
+VIX ≥ 30 & F&G < 20                           → "공포"
+VIX < 15 & F&G > 75                           → "과열"
+F&G ≥ 50 & VIX < 20 & spread ≥ 0 & SP위      → "강세"
+20 ≤ VIX ≤ 30 & VIX하락중(5dMA<20dMA) & F&G≥30 → "회복"
+F&G < 30 & SP아래  또는  F&G < 30 & VIX 30~40  → "조정"
+(해당 없음)                                    → "경계"
 ```
 
-**입력 지표 4개**: 공포탐욕점수, VIX, 10Y-2Y 금리차, S&P500 vs 200일선
+| 국면 | 요약 |
+|---|---|
+| 강세 | 성장주·경기민감 비중 확대 |
+| 과열 | 신규 진입 신중, 일부 차익 고려 |
+| 회복 | 공포 해소 중 — 선별적 분할 매수 |
+| 경계 | 방향 불명확 — 방어 섹터 유지 |
+| 조정 | 안전자산 선호, 방어적 대응 |
+| 공포 | 현금 확보 및 분할 매수 기회 탐색 |
 
 ---
 
-## 5. 기술분석 신호 계산
+## 5. 기술분석 신호 10개
 
-`fetch_technical_signals(tickers: tuple)` 함수가 각 ticker에 대해:
+`fetch_technical_signals(tickers)` 및 `compute_checkup()`이 동일한 10개 신호를 사용.
 
-1. yfinance로 1년 일봉 다운로드
-2. `ta.RSIIndicator(window=14)` → RSI 값
-3. `ta.SMAIndicator(window=50)` → SMA50
-4. `ta.SMAIndicator(window=200)` → SMA200
+| # | 지표 | 매수 +1 | 매도 +1 | 비고 |
+|---|---|---|---|---|
+| 1 | RSI(14) | < 30 | > 70 | 중립 구간은 카운팅 없음 |
+| 2 | SMA50 | 현재가 위 | 현재가 아래 | 항상 1개 발생 |
+| 3 | SMA200 | 현재가 위 | 현재가 아래 | 항상 1개 발생 |
+| 4 | MACD | 골든크로스 | 데드크로스 | 항상 1개 발생 |
+| 5 | 볼린저밴드(20,2σ) | 하단 이탈 | 상단 이탈 | 밴드 내는 카운팅 없음 |
+| 6 | Ichimoku TK크로스 | 전환선 > 기준선 | 전환선 < 기준선 | 데이터 ≥52봉 필요 |
+| 7 | Ichimoku 구름 위치 | 구름 위 | 구름 아래 | 구름 내는 카운팅 없음 |
+| 8 | MFI(14) | < 20 | > 80 | 중립 구간은 카운팅 없음 |
+| 9 | 거래량 (20일 평균 1.5배↑) | 고거래량 + 가격 상승 | 고거래량 + 가격 하락 | 조건 미충족 시 없음 |
+| 10 | 52주 신고가권 (현재가 ≥ 고가×95%) | 매수만 | — | 매도 신호 없음 |
 
-**신호 카운팅**:
-| 조건 | 매수신호 +1 | 매도신호 +1 |
-|---|---|---|
-| RSI | < 30 (과매도) | > 70 (과매수) |
-| SMA50 | 현재가 위 | 현재가 아래 |
-| SMA200 | 현재가 위 | 현재가 아래 |
+> 이론적 최대: 매수 10개, 매도 9개.  
+> SMA50·SMA200·MACD는 항상 buy/sell 중 하나 발생 → 최소 매수 또는 매도 3개 보장.
 
-- 매수신호 ≥ 2 → 초록 하이라이트
-- 매도신호 ≥ 2 → 빨강 하이라이트
+### 참고 컬럼 (신호 카운팅 미포함)
+
+| 컬럼 | 계산 방식 |
+|---|---|
+| Weinstein Stage | 150일(30주) SMA 위치·방향 → Stage 1~4 |
+| RSI해석 | RSI 구간 + 5일 전 대비 방향(rsi_delta) 조합 문장 |
+| RSI다이버전스 | 63봉 스윙 피봇 기반 4종: 일반강세·일반약세·숨겨진강세·숨겨진약세 |
+| 주봉RSI | 2년 주봉 RSI(14) — 장기 과매수/과매도 참고 |
+| RS vs S&P | 1·3·12개월 수익률에서 S&P500 동기간 수익률 차감 |
 
 ---
 
-## 6. 섹터 로테이션 룰 (하드코딩)
+## 6. 포지션 판단 (position_guidance)
+
+`MAX_SIGNALS = 10` 기준 비율로 판단. 절대값이 아닌 비율(%) 사용 — 신호 수 변경 시에도 스케일 불변.
+
+```
+buy_pct  = 매수신호 / 10
+sell_pct = 매도신호 / 10
+
+신규진입:
+  sell_pct ≥ 60% or (약세다이버전스 & sell_pct ≥ 40%)  → ⛔ 진입 보류
+  buy_pct  ≥ 70% & RSI 정상                             → ✅ 진입 적합
+  buy_pct  ≥ 60% & RSI 과매수                           → ⏳ 조정 후 진입
+  buy_pct  ≥ 60% & RSI 정상                             → ✅ 진입 적합
+  RSI 과매도 & 강세다이버전스                            → 🔍 분할 매수 검토
+  그 외                                                  → 👀 관망
+
+보유판단:
+  sell_pct ≥ 60% or (약세다이버전스 & sell_pct ≥ 40%)  → 🚨 매도 검토
+  RSI 과매수 & sell_pct ≥ 30% & 다이버전스 없음         → ⚠️ 부분 차익 검토
+  buy_pct ≥ 30% & sell_pct ≥ 30%                       → 👀 신호 혼재
+  buy_pct ≥ 50% or 강세다이버전스                       → ✊ 보유 유지
+  sell_pct ≥ 40%                                        → 🚨 매도 검토
+  그 외                                                  → ✊ 보유 유지
+```
+
+> ⚠️ 임계값은 휴리스틱 — 백테스팅 미검증. 참고용으로만 사용.
+
+---
+
+## 7. 개별 종목 검진 (compute_checkup)
+
+`tab_checkup()` → `compute_checkup(ticker_input, phase)` 호출.
+
+- 종목 입력: 미국 티커(AAPL) 또는 한국 6자리 코드(005930) → `resolve_ticker()`로 yfinance 형식 변환
+- 신호 10개 동일 계산 (fetch_technical_signals과 동일 로직)
+- 추가 계산: ADX(추세 강도), OBV, ATR(변동성%), 52주 고저 위치바, PER·PBR·ROE(Quality)
+- 결과: 신호별 방향(+1/0/-1) 테이블 + Weinstein 배지 + 종합 진단 문장 + 포지션 카드
+
+---
+
+## 8. 섹터 로테이션 룰 (하드코딩)
 
 | 국면 | 비중 확대 | 비중 축소 |
 |---|---|---|
 | 강세 | XLK(기술), XLY(임의소비재), XLI(산업) | XLU(유틸), XLP(필수소비재), XLRE(부동산) |
+| 과열 | XLV(헬스케어), XLP(필수소비재) | XLK(기술), XLY(임의소비재), XLI(산업) |
+| 회복 | XLK(기술), XLF(금융), XLI(산업) | XLU(유틸), XLP(필수소비재) |
 | 경계 | XLV(헬스케어), XLP(필수소비재), XLU(유틸) | XLK(기술), XLY(임의소비재) |
 | 조정 | XLV(헬스케어), XLP(필수소비재), GLD(금) | XLK(기술), XLY(임의소비재), XLI(산업) |
 | 공포 | XLU(유틸), XLP(필수소비재), GLD(금) | XLK(기술), XLY(임의소비재), XLF(금융) |
 
 ---
 
-## 7. 알려진 제약 및 한계
+## 9. 알려진 제약 및 한계
 
 | 항목 | 현황 | 원인 |
 |---|---|---|
-| 외국인/기관 순매매 | 클라우드에서 불안정 | SnapDataReader가 Naver Finance HTML 스크래핑 → 클라우드 IP 차단 |
-| 한국 시총 TOP10 | fdr 실패 시 2025년 기준 하드코딩 | StockListing 클라우드 접근 불안정 |
-| 한국 기술분석 | 약 30초 소요 | yfinance 개별 종목 10회 순차 호출 |
-| 국면 판정 | 단순 규칙 기반 (4변수) | 머신러닝/가중치 미적용 |
-| 종목 추천 | 신호 개수 카운팅만 사용 | 모멘텀·거래량·추세 강도 미반영 |
+| 외국인/기관 순매매 | 클라우드에서 불안정 | SnapDataReader가 Naver Finance HTML 스크래핑 → 클라우드 IP 차단 가능 |
+| 한국 시총 TOP10 | fdr 실패 시 하드코딩 fallback | StockListing 클라우드 접근 불안정 |
+| 한국 기술분석 | 약 30초 소요 | yfinance 개별 종목 순차 호출 |
+| 국면 판정 | 단순 규칙 기반 (5변수) | 머신러닝/가중치 미적용 |
+| 신호 임계값 | 휴리스틱 (60%, 50%) | 백테스팅 미검증 |
+| 신호 독립성 | SMA50·SMA200·MACD 추세 상관 높음 | "3개 독립 확인"이 실제론 1가지 추세의 3번 반복일 수 있음 |
+| RSI 다이버전스 | 63봉 미만·스윙 피봇 부족 시 "-" | 탐지 조건 미충족 (데이터 부족 아님) |
 
 ---
 
----
+## 로드맵 (미구현)
 
-# 고도화 로드맵
+### Phase A — 한국 데이터 안정화
 
-## Phase 1 — 기술분석 지표 확장 (난이도: 하)
-
-현재 RSI + SMA 2개만 사용. 아래 지표를 `ta` 패키지로 추가 가능.
-
-```python
-from ta.trend import MACD, EMAIndicator
-from ta.volatility import BollingerBands
-from ta.volume import OnBalanceVolumeIndicator
-
-# MACD 골든크로스/데드크로스
-macd = MACD(close=close)
-macd_signal = macd.macd_signal()
-macd_line   = macd.macd()
-golden_cross = macd_line.iloc[-1] > macd_signal.iloc[-1]  # 매수
-
-# 볼린저밴드 이탈
-bb = BollingerBands(close=close, window=20, window_dev=2)
-bb_low  = float(bb.bollinger_lband().iloc[-1])   # 하단 이탈 → 과매도
-bb_high = float(bb.bollinger_hband().iloc[-1])   # 상단 이탈 → 과매수
-
-# OBV (거래량 기반 추세 확인)
-obv = OnBalanceVolumeIndicator(close=close, volume=hist["Volume"]).on_balance_volume()
-obv_rising = obv.iloc[-1] > obv.iloc[-5]  # 5일 전보다 OBV 상승 → 매수세 유입
-```
-
-**추가하면 신호 카운팅이 3개 → 6개로 확장됨. 임계값도 ≥3 으로 조정 권장.**
-
----
-
-## Phase 2 — 신호 스코어링 시스템 (난이도: 중)
-
-현재 단순 카운팅(0/1/2/3) 방식을 가중치 점수제로 전환.
-
-```python
-SIGNAL_WEIGHTS = {
-    "RSI 과매도":      2.0,   # RSI는 신뢰도 높음
-    "SMA200 위":       1.5,   # 장기 추세가 단기보다 중요
-    "SMA50 위":        1.0,
-    "MACD 골든크로스": 1.5,
-    "BB 하단 이탈":    1.0,
-    "OBV 상승":        0.5,   # 거래량은 보조 확인용
-}
-
-# 총점 계산 → 0~10 정규화 → "매수강도" 컬럼
-buy_score = sum(SIGNAL_WEIGHTS[s] for s in signals if s in BUY_SIGNALS)
-sell_score = sum(SIGNAL_WEIGHTS[s] for s in signals if s in SELL_SIGNALS)
-```
-
-**결과**: 종목별 매수강도 점수로 정렬 가능. 단순 2개 이상 필터보다 세밀한 추천.
-
----
-
-## Phase 3 — 모멘텀 및 상대강도 (난이도: 중)
-
-섹터/종목의 **상대적** 강도를 측정해 "지금 뭐가 제일 강한가"를 찾는 방식.
-
-```python
-# 52주 모멘텀 (현재가 / 52주 전 가격 - 1)
-price_52w_ago = float(hist["Close"].iloc[0])
-momentum_52w  = (price - price_52w_ago) / price_52w_ago * 100
-
-# 3개월 모멘텀
-price_3m_ago = float(hist["Close"].iloc[-63])
-momentum_3m  = (price - price_3m_ago) / price_3m_ago * 100
-
-# 상대강도 (vs S&P500)
-sp_return = (sp_hist["Close"].iloc[-1] - sp_hist["Close"].iloc[-63]) / sp_hist["Close"].iloc[-63]
-relative_strength = momentum_3m - sp_return * 100
-```
-
-**활용**: 섹터 ETF에 적용 → "S&P500보다 강한 섹터"를 자동 정렬하면 로테이션 신호 자동화 가능.
-
----
-
-## Phase 4 — 멀티타임프레임 분석 (난이도: 중)
-
-현재는 일봉(1d)만 사용. 주봉(1wk)을 추가하면 노이즈 감소.
-
-```python
-@st.cache_data(ttl=3600)  # 주봉은 캐시 1시간으로 충분
-def fetch_weekly_signals(tickers: tuple) -> pd.DataFrame:
-    for ticker in tickers:
-        hist_w = yf.Ticker(ticker).history(period="2y", interval="1wk")
-        rsi_w  = RSIIndicator(close=hist_w["Close"], window=14).rsi().iloc[-1]
-        # 일봉 RSI와 주봉 RSI가 모두 과매도일 때만 강한 매수신호
-```
-
-**매매 원칙**: 주봉 방향 = 큰 그림 / 일봉 신호 = 진입 타이밍. 두 타임프레임이 일치할 때만 추천.
-
----
-
-## Phase 5 — 한국 데이터 안정화 (난이도: 중)
-
-### 외국인/기관 순매매 대안
+외국인/기관 순매매와 시총 순위를 KRX 공식 API로 대체해 클라우드 IP 차단 문제 해결.
 
 ```python
 # KRX OpenAPI (무료, 인증 불필요)
 KRX_URL = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
 
-def fetch_krx_investor_flow(code: str) -> dict:
-    params = {
-        "bld": "dbms/MDC/STAT/standard/MDCSTAT02302",
-        "isuCd": code,
-        "strtDd": (pd.Timestamp.today() - pd.Timedelta(days=10)).strftime("%Y%m%d"),
-        "endDd": pd.Timestamp.today().strftime("%Y%m%d"),
-    }
-    r = requests.post(KRX_URL, data=params, timeout=10)
-    return r.json()
+# 외국인 순매매: bld=dbms/MDC/STAT/standard/MDCSTAT02302
+# 시가총액 순위: bld=dbms/MDC/STAT/standard/MDCSTAT01501
 ```
 
-Naver Finance 의존 제거 → KRX 공식 API로 대체하면 클라우드에서도 안정적.
-
-### 한국 시총 TOP10 동적 업데이트
-
-```python
-# KRX 전체 시장 데이터 (일별 갱신)
-KRX_MARKET_URL = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
-# bld: dbms/MDC/STAT/standard/MDCSTAT01501 → 시가총액 순위
-```
-
-하드코딩 대신 KRX에서 실시간 시총 순위를 가져오면 종목 변경에도 자동 대응.
+Naver Finance HTML 스크래핑 의존 제거 → 클라우드 안정성 확보.
 
 ---
 
-## Phase 6 — 추천 고도화: 국면 × 기술신호 복합 필터 (난이도: 중-상)
+### Phase B — 알림 시스템
 
-현재 추천 로직: `매수신호 ≥ 2`
-개선 추천 로직: **국면 × 섹터 방향 × 기술신호 × 모멘텀** 복합 필터
-
-```python
-def score_ticker(ticker: str, phase: str, tech: dict, momentum: float) -> float:
-    score = 0.0
-
-    # 1. 국면 적합성 (섹터 로테이션 룰과 일치 여부)
-    if ticker in PHASE_SECTORS[phase]["buy"]:
-        score += 3.0
-    elif ticker in PHASE_SECTORS[phase]["sell"]:
-        score -= 3.0
-
-    # 2. 기술신호 가중합
-    score += tech["buy_score"] - tech["sell_score"]
-
-    # 3. 모멘텀 (3개월 수익률 기준, S&P500 초과분)
-    score += min(max(momentum / 10, -2.0), 2.0)  # -2 ~ +2 클리핑
-
-    # 4. 공포탐욕 극단값 보정 (극도의 공포 → 매수 가중, 극도의 탐욕 → 매도 가중)
-    fg = fetch_fear_greed()
-    if fg:
-        if fg["score"] < 20:   score += 1.0   # 극도의 공포 = 매수 프리미엄
-        elif fg["score"] > 80: score -= 1.0   # 극도의 탐욕 = 매도 프리미엄
-
-    return score
-
-# 최종 출력: 점수 내림차순 정렬 → 상위 3개 "강력 매수", 하위 3개 "경계"
-```
-
----
-
-## Phase 7 — 알림 시스템 (난이도: 상)
-
-Streamlit Cloud는 상시 실행이 아니라 접속 시에만 작동함. 정기 알림을 위해선 별도 스케줄러 필요.
+Streamlit Cloud는 접속 시에만 실행 → 정기 알림은 별도 스케줄러 필요.
 
 **옵션 A — GitHub Actions 크론**
 ```yaml
 # .github/workflows/alert.yml
 on:
   schedule:
-    - cron: '0 1 * * 1-5'  # 평일 오전 10시 KST (UTC 01:00)
+    - cron: '0 1 * * 1-5'  # 평일 오전 10시 KST
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: pip install yfinance requests
-      - run: python alert.py  # VIX > 30 또는 RSI < 30 종목 → 슬랙/이메일 발송
+      - run: python alert.py  # VIX > 30 또는 RSI < 30 종목 → 이메일/슬랙 발송
 ```
 
-**옵션 B — Streamlit + st.session_state 폴링**
-앱이 열려있는 동안만 동작하지만, `time.sleep` + `st.rerun()`으로 실시간 모니터링 탭 추가 가능.
+**옵션 B — st.rerun() 폴링**  
+앱이 열려있는 동안만 작동하지만, `time.sleep` + `st.rerun()`으로 실시간 모니터링 탭 추가 가능.
 
 ---
 
-## Phase 8 — 백테스트 탭 추가 (난이도: 상)
+### Phase C — 백테스트 탭
 
-"이 신호 조합이 과거에 실제로 유효했는가" 검증.
+"이 신호 조합이 과거에 실제로 유효했는가" 검증. 신호 임계값 휴리스틱을 데이터 기반으로 교체하는 핵심 작업.
 
 ```python
-# vectorbt 라이브러리 (pip install vectorbt)
+# vectorbt 라이브러리
 import vectorbt as vbt
 
-def backtest_rsi_sma(ticker: str) -> dict:
-    hist = yf.Ticker(ticker).history(period="5y", interval="1d")
-    close = hist["Close"]
+def backtest_signal(ticker: str, buy_pct_threshold: float = 0.6) -> dict:
+    hist  = yf.Ticker(ticker).history(period="5y", interval="1d")
+    # fetch_technical_signals 로직으로 일별 buy_cnt/sell_cnt 계산
+    entries = daily_buy_pct >= buy_pct_threshold
+    exits   = daily_sell_pct >= buy_pct_threshold
 
-    rsi = RSIIndicator(close=close, window=14).rsi()
-    sma200 = SMAIndicator(close=close, window=200).sma_indicator()
-
-    entries = (rsi < 30) & (close > sma200)   # RSI 과매도 + 200일선 위
-    exits   = (rsi > 70) | (close < sma200)   # RSI 과매수 또는 200일선 이탈
-
-    pf = vbt.Portfolio.from_signals(close, entries, exits, init_cash=10000)
+    pf = vbt.Portfolio.from_signals(hist["Close"], entries, exits, init_cash=10000)
     return {
         "total_return": pf.total_return(),
-        "sharpe": pf.sharpe_ratio(),
+        "sharpe":       pf.sharpe_ratio(),
         "max_drawdown": pf.max_drawdown(),
-        "win_rate": pf.trades.win_rate(),
+        "win_rate":     pf.trades.win_rate(),
     }
 ```
 
----
-
-## 우선순위 추천 로드맵
-
-```
-지금 버전 (v1.0)
-    ↓
-Phase 1: MACD + 볼린저밴드 추가          ← 가장 빠른 개선, 코드 30줄
-    ↓
-Phase 3: 3개월 모멘텀 + 상대강도         ← 섹터 로테이션 자동화 핵심
-    ↓
-Phase 6: 복합 스코어링 시스템            ← 추천 품질 대폭 향상
-    ↓
-Phase 5: KRX API로 한국 데이터 안정화   ← 한국장 신뢰도 확보
-    ↓
-Phase 8: 백테스트 탭                     ← 신호 검증 및 신뢰도 구축
-    ↓
-Phase 7: GitHub Actions 알림            ← 모니터링 자동화
-```
+결과를 바탕으로 60%·50% 임계값의 실증적 근거 확보 또는 조정.
