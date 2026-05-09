@@ -1792,36 +1792,55 @@ def tab_checkup(phase: str | None) -> None:
         "3개 이상이면 해당 방향 신호 우세로 판단. "
         "Weinstein Stage 2 + 매수신호 ≥ 3 조합이 가장 선호되는 진입 조건입니다."
     )
-    st.markdown(
-        "<style>"
-        "[data-testid='stMetricLabel'] p { font-size:0.7rem !important; white-space:normal !important; line-height:1.3 !important; }"
-        "[data-testid='stMetricDelta']  { font-size:0.67rem !important; }"
-        "</style>",
-        unsafe_allow_html=True,
-    )
-
-    g1, g2, g3, g4, g5 = st.columns(5)
-    g1.metric("매수신호", f"{r['buy_score']}개",
-              "✓ 6개 이상 — 진입 고려" if r["buy_score"] >= 6 else "6개 미달")
-    g2.metric("매도신호", f"{r['sell_score']}개",
-              "⚠ 7개 이상 — 경계 요망" if r["sell_score"] >= 7 else "7개 미달",
-              delta_color="inverse")
-    g3.metric("신규진입 판단", r["entry"])
-    g4.metric("보유 판단", r["hold"])
-
-    div_val = r["divergence"]
-    div_delta = {
+    div_val   = r["divergence"]
+    div_sub   = {
         "🟢 일반강세":   "반등 선행 신호",
         "🔴 일반약세":   "조정 선행 신호",
         "🔵 숨겨진강세": "상승 추세 지속",
         "🟠 숨겨진약세": "하락 추세 지속",
-    }.get(div_val, "감지 없음 (추세 유효)")
-    g5.metric("RSI 다이버전스", div_val if div_val != "-" else "—", div_delta)
+    }.get(div_val, "감지 없음")
+    div_color = {
+        "🟢 일반강세":   "#00C851",
+        "🔵 숨겨진강세": "#00D4FF",
+        "🔴 일반약세":   "#FF3547",
+        "🟠 숨겨진약세": "#FF8C00",
+    }.get(div_val, "#888888")
+    hold_color = {
+        "✊ 보유 유지":        "#00C851",
+        "⚠️ 부분 차익 검토":  "#FFD700",
+        "👀 신호 혼재":       "#888888",
+        "🚨 매도 검토":       "#FF3547",
+    }.get(r["hold"], "#888888")
+    _ec = {
+        "✅ 진입 적합":      "#00C851",
+        "⏳ 조정 후 진입":   "#FFD700",
+        "🔍 분할 매수 검토": "#00D4FF",
+        "⛔ 진입 보류":      "#FF3547",
+        "👀 관망":           "#888888",
+    }.get(r["entry"], "#888888")
+    _bc = "#00C851" if r["buy_score"] >= 6 else "#aaa"
+    _sc = "#FF3547" if r["sell_score"] >= 7 else "#aaa"
+    _buy_sub  = "✓ 6개 이상 — 진입 고려" if r["buy_score"] >= 6 else "6개 미달"
+    _sell_sub = "⚠ 7개 이상 — 경계 요망" if r["sell_score"] >= 7 else "7개 미달"
 
-    st.caption(
-        "신규진입: 지금 처음 사는 경우의 타이밍 판단. "
-        "보유판단: 이미 보유 중인 경우 매도/유지 판단. "
-        "RSI다이버전스: 가격·RSI 방향이 엇갈릴 때 추세 전환/지속 선행 신호."
+    def _mcard(label: str, value: str, sub: str, vc: str = "#FAFAFA", sc: str = "#aaa") -> str:
+        return (
+            f"<div style='background:#1A1F2E;border-radius:7px;padding:10px 12px'>"
+            f"<div style='color:#aaa;font-size:0.68rem;line-height:1.3;margin-bottom:4px'>{label}</div>"
+            f"<div style='font-size:1.1rem;font-weight:700;color:{vc};word-break:break-word'>{value}</div>"
+            f"<div style='font-size:0.67rem;color:{sc};margin-top:3px;line-height:1.3'>{sub}</div>"
+            f"</div>"
+        )
+
+    st.markdown(
+        "<div style='display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:8px 0'>"
+        + _mcard("매수신호",    f"{r['buy_score']}개",                  _buy_sub,  _bc, _bc)
+        + _mcard("매도신호",    f"{r['sell_score']}개",                 _sell_sub, _sc, _sc)
+        + _mcard("신규진입 판단", r["entry"],                           "처음 사는 경우", _ec, "#888")
+        + _mcard("보유 판단",   r["hold"],                              "이미 보유 중인 경우", hold_color, "#888")
+        + _mcard("RSI 다이버전스", div_val if div_val != "-" else "—",  div_sub, div_color, div_color)
+        + "</div>",
+        unsafe_allow_html=True,
     )
 
     entry_color = {
