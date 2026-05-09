@@ -416,7 +416,7 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
                 signals.append("BB 상단 이탈")
                 sell_cnt += 1
 
-            # Ichimoku TK 크로스 + 구름 위치
+            # 일목균형표 TK 크로스 + 구름 위치
             if len(close) >= 52:
                 try:
                     ich = IchimokuIndicator(high=high_s, low=low_s, window1=9, window2=26, window3=52)
@@ -426,10 +426,10 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
                     span_b = float(ich.ichimoku_b().iloc[-1])
                     if not (pd.isna(tenkan) or pd.isna(kijun)):
                         if tenkan > kijun:
-                            signals.append("Ichimoku 골든TK")
+                            signals.append("일목균형표 골든TK")
                             buy_cnt += 1
                         else:
-                            signals.append("Ichimoku 데드TK")
+                            signals.append("일목균형표 데드TK")
                             sell_cnt += 1
                     if not (pd.isna(span_a) or pd.isna(span_b)):
                         cloud_top    = max(span_a, span_b)
@@ -993,7 +993,7 @@ def resolve_ticker(query: str) -> list[tuple[str, str, bool]]:
 
 @st.cache_data(ttl=300)
 def compute_checkup(ticker_input: str, phase: str) -> dict | None:
-    """단일 종목 종합 검진 — RSI·SMA·MACD·BB·거래량·Ichimoku·MFI·Weinstein·Quality."""
+    """단일 종목 종합 검진 — RSI·SMA·MACD·BB·거래량·일목균형표·MFI·Weinstein·Quality."""
     is_korean = ticker_input.isdigit() and len(ticker_input) == 6
     pf = (lambda v: f"{v:,.0f}") if is_korean else (lambda v: f"{v:.2f}")
     try:
@@ -1073,7 +1073,7 @@ def compute_checkup(ticker_input: str, phase: str) -> dict | None:
         atr_val = float(AverageTrueRange(high=high_s, low=low_s, close=close, window=14).average_true_range().iloc[-1])
         atr_pct = round(atr_val / price * 100, 2)
 
-        # ── Ichimoku (전환선·기준선·구름) ───────────────────────────────────
+        # ── 일목균형표 (전환선·기준선·구름) ───────────────────────────────────
         ich_available = False
         ich_tenkan = ich_kijun = ich_span_a = ich_span_b = float("nan")
         if len(close) >= 52:
@@ -1188,26 +1188,26 @@ def compute_checkup(ticker_input: str, phase: str) -> dict | None:
         else:
             _neutral(f"52주 위치 {pos52:.0f}%", "신고가 미도달 (중립)")
 
-        # Ichimoku TK 크로스
+        # 일목균형표 TK 크로스
         if ich_available:
             if ich_tenkan > ich_kijun:
-                _add(f"Ichimoku TK({pf(ich_tenkan)}/{pf(ich_kijun)})",
+                _add(f"일목균형표 TK({pf(ich_tenkan)}/{pf(ich_kijun)})",
                      "전환선 > 기준선 → 단기 상승 압력", +1)
             else:
-                _add(f"Ichimoku TK({pf(ich_tenkan)}/{pf(ich_kijun)})",
+                _add(f"일목균형표 TK({pf(ich_tenkan)}/{pf(ich_kijun)})",
                      "전환선 < 기준선 → 단기 하락 압력", -1)
 
             # 가격 vs 구름
             cloud_top    = max(ich_span_a, ich_span_b)
             cloud_bottom = min(ich_span_a, ich_span_b)
             if price > cloud_top:
-                _add(f"Ichimoku 구름 위({pf(cloud_top)})",
+                _add(f"일목균형표 구름 위({pf(cloud_top)})",
                      "구름 위 → 강세 추세. 구름이 지지선 역할", +1)
             elif price < cloud_bottom:
-                _add(f"Ichimoku 구름 아래({pf(cloud_bottom)})",
+                _add(f"일목균형표 구름 아래({pf(cloud_bottom)})",
                      "구름 아래 → 약세 추세. 구름이 저항선 역할", -1)
             else:
-                _neutral(f"Ichimoku 구름 내({pf(cloud_bottom)}~{pf(cloud_top)})",
+                _neutral(f"일목균형표 구름 내({pf(cloud_bottom)}~{pf(cloud_top)})",
                          "구름 안 → 추세 불명확 (방향 확인 필요)")
 
         # MFI
@@ -1238,7 +1238,7 @@ def compute_checkup(ticker_input: str, phase: str) -> dict | None:
 
         parts = []
         if not trending:
-            parts.append(f"ADX {adx_val:.0f} 횡보장 — SMA·MACD·Ichimoku 등 추세 추종 신호 위신호 주의")
+            parts.append(f"ADX {adx_val:.0f} 횡보장 — SMA·MACD·일목균형표 등 추세 추종 신호 위신호 주의")
         elif adx_val >= 30:
             parts.append(f"ADX {adx_val:.0f} 강한 추세 — 추세 추종 신호 신뢰도 높음")
         if ws:
@@ -1455,8 +1455,8 @@ def tab_checkup(phase: str | None) -> None:
 | **BB(볼린저밴드)** | 20일 이평 ±2σ. 상단 이탈 = 과열, 하단 이탈 = 과매도 |
 | **거래량** | 20일 평균 대비 1.5배 이상 + 가격 방향 결합 |
 | **52주 신고가권** | 최고가 95% 이상 = 모멘텀 지속 가능성 |
-| **Ichimoku TK** | 전환선(9) vs 기준선(26). 전환 > 기준 = 단기 상승 압력 |
-| **Ichimoku 구름** | 가격이 구름 위 = 강세, 구름 아래 = 약세, 구름 안 = 불명 |
+| **일목균형표 TK** | 전환선(9) vs 기준선(26). 전환 > 기준 = 단기 상승 압력 |
+| **일목균형표 구름** | 가격이 구름 위 = 강세, 구름 아래 = 약세, 구름 안 = 불명 |
 | **MFI** | 거래량 반영 RSI. 80 초과 = 자금 이탈, 20 미만 = 자금 유입 |
 
 **ADX** — 추세 강도 (점수 미포함, 신뢰도 참고용). 방향이 아닌 **강도**를 측정. 25 이상 = 추세장(신호 신뢰↑), 25 미만 = 횡보장(가격이 일정 범위 안에서 등락, 추세 추종 신호 위험↑).
@@ -1468,7 +1468,7 @@ def tab_checkup(phase: str | None) -> None:
         st.warning(
             f"**ADX {r['adx_val']:.1f} — 횡보장.** "
             f"가격이 뚜렷한 방향 없이 일정 범위 안에서 등락하는 구간입니다. "
-            f"이때 SMA·MACD·Ichimoku 같은 **추세 추종 신호는 위신호(false signal)가 잦아** 신뢰도가 떨어집니다. "
+            f"이때 SMA·MACD·일목균형표 같은 **추세 추종 신호는 위신호(false signal)가 잦아** 신뢰도가 떨어집니다. "
             f"RSI·볼린저밴드처럼 과매수/과매도를 보는 **평균회귀 신호는 상대적으로 유효**합니다. "
             f"매수·매도 신호 개수보다 신호 종류를 함께 확인하세요."
         )
@@ -1570,7 +1570,7 @@ def tab_checkup(phase: str | None) -> None:
         f"SMA20: {sma20_fmt} / SMA50: {sma50_fmt} / SMA200: {sma200_fmt}",
         sma_bg), unsafe_allow_html=True)
 
-    # Ichimoku 카드
+    # 일목균형표 카드
     if r["ich_available"]:
         pf2 = (lambda v: f"{v:,.0f}원") if is_kr else (lambda v: f"${v:.2f}")
         cloud_top    = max(r["ich_span_a"], r["ich_span_b"])
@@ -1586,7 +1586,7 @@ def tab_checkup(phase: str | None) -> None:
             ich_exp = "가격이 구름(Kumo) 안에 있습니다. 방향 전환 구간으로 신호가 혼재합니다."
         tk_dir = "전환선 > 기준선 (단기 강세)" if r["ich_tenkan"] > r["ich_kijun"] else "전환선 < 기준선 (단기 약세)"
         right_col.markdown(_card(
-            "Ichimoku 일목균형표",
+            "일목균형표",
             ich_pos,
             f"TK크로스: {tk_dir}<br>"
             f"전환선(9일): {pf2(r['ich_tenkan'])} / 기준선(26일): {pf2(r['ich_kijun'])}<br>"
@@ -1717,8 +1717,8 @@ def signal_legend() -> None:
 | SMA50 (50일 이평선) | 현재가 위 | 현재가 아래 | 최근 2개월 평균보다 비싸면 단기 추세 살아있음 |
 | SMA200 (200일 이평선) | 현재가 위 | 현재가 아래 | 1년 평균보다 비싸면 장기 추세도 살아있음. 가장 중요한 선 |
 | MACD | 골든크로스 | 데드크로스 | 단기 이평이 장기 이평을 뚫고 올라오면 상승 모멘텀 시작 신호 |
-| Ichimoku TK크로스 | 전환선 > 기준선 | 전환선 < 기준선 | 9일선이 26일선 위면 단기 주도권이 매수 측에 있음 |
-| Ichimoku 구름 위치 | 구름 위 | 구름 아래 | 구름은 지지/저항 영역. 구름 위면 추세가 강하고 구름이 버팀목 역할 |
+| 일목균형표 TK크로스 | 전환선 > 기준선 | 전환선 < 기준선 | 9일선이 26일선 위면 단기 주도권이 매수 측에 있음 |
+| 일목균형표 구름 위치 | 구름 위 | 구름 아래 | 구름은 지지/저항 영역. 구름 위면 추세가 강하고 구름이 버팀목 역할 |
 | OBV (누적 거래량) | 20일 MA 위 | 20일 MA 아래 | 거래량을 누적해 매수세·매도세 중 어느 쪽이 더 쌓이고 있는지 확인 |
 
 **🟡 과매수/과매도 신호 (3개) — 추세장·횡보장 모두 유효**
