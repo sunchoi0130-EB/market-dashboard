@@ -856,6 +856,66 @@ def add_relative_strength(tech_df: pd.DataFrame, sp_ret: dict[str, float]) -> pd
     return df
 
 
+def render_alert_banner() -> None:
+    """접속 시 감시 종목 중 강한 신호 종목만 상단에 표시."""
+    us_tickers = tuple(dict.fromkeys(WATCHLIST + [t for picks in US_CLAUDE_PICKS.values() for t in picks]))
+    kr_tickers = tuple(f"{c}.KS" for picks in KR_CLAUDE_PICKS.values() for c in picks)
+
+    us_df = fetch_technical_signals(us_tickers)
+    kr_df = fetch_technical_signals(kr_tickers)
+
+    frames = [df for df in [us_df, kr_df] if not df.empty]
+    if not frames:
+        return
+    all_df = pd.concat(frames, ignore_index=True)
+
+    all_df[["신규진입", "보유판단"]] = all_df.apply(
+        lambda row: pd.Series(position_guidance(row)), axis=1
+    )
+
+    buy_hits  = all_df[all_df["매수신호"] >= 6].sort_values("매수신호", ascending=False)
+    sell_hits = all_df[all_df["매도신호"] >= 7].sort_values("매도신호", ascending=False)
+
+    if buy_hits.empty and sell_hits.empty:
+        return
+
+    def _name(ticker: str) -> str:
+        base = ticker.replace(".KS", "").replace(".KQ", "")
+        return TICKER_NAMES.get(base, KR_CLAUDE_PICK_NAMES.get(base, base))
+
+    label = f"🔔 오늘의 신호 알림  ·  매수 {len(buy_hits)}종목  ·  매도 {len(sell_hits)}종목"
+    with st.expander(label, expanded=True):
+        if not buy_hits.empty:
+            st.markdown("**✅ 매수 신호 강함 (매수신호 ≥ 6)**")
+            cols = st.columns(min(len(buy_hits), 5))
+            for i, (_, row) in enumerate(buy_hits.head(5).iterrows()):
+                cols[i].metric(
+                    _name(str(row["티커"])),
+                    f"매수 {int(row['매수신호'])} · 매도 {int(row['매도신호'])}",
+                    row["신규진입"],
+                )
+            if len(buy_hits) > 5:
+                st.caption(f"외 {len(buy_hits) - 5}종목 — 미국장/한국장 탭에서 전체 확인")
+
+        if not sell_hits.empty:
+            st.markdown("**⛔ 매도/경계 신호 (매도신호 ≥ 7)**")
+            cols = st.columns(min(len(sell_hits), 5))
+            for i, (_, row) in enumerate(sell_hits.head(5).iterrows()):
+                cols[i].metric(
+                    _name(str(row["티커"])),
+                    f"매수 {int(row['매수신호'])} · 매도 {int(row['매도신호'])}",
+                    row["신규진입"],
+                    delta_color="inverse",
+                )
+            if len(sell_hits) > 5:
+                st.caption(f"외 {len(sell_hits) - 5}종목 — 미국장/한국장 탭에서 전체 확인")
+
+        st.caption(
+            f"감시 종목 {len(all_df)}개 기준  ·  {pd.Timestamp.now().strftime('%H:%M')} 조회  ·  "
+            "캐시 기준 데이터 (새로고침: 사이드바 버튼)"
+        )
+
+
 def highlight_signals(row: pd.Series) -> list[str]:
     if row.get("매수신호", 0) >= 7:
         return ["background-color:#0d3b1f"] * len(row)
@@ -2495,6 +2555,8 @@ Claude Code에서 요청:
         """)
 
     st.title("📊 글로벌 시장 분석 대시보드")
+
+    render_alert_banner()
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["🌐 시장 개요", "🇺🇸 미국장", "🇰🇷 한국장", "📈 매수/매도 추천", "🔍 종목 검진"])
 
