@@ -1027,16 +1027,26 @@ def highlight_signals(row: pd.Series) -> list[str]:
 
 def position_guidance(row: pd.Series) -> tuple[str, str]:
     """
-    신규진입·보유판단 레이블 (11개 신호 기준 정수 비교).
+    신규진입·보유판단 레이블 (11개 신호 + Weinstein Stage 기준).
     ※ 임계값은 휴리스틱 — 백테스팅 미검증. 참고용으로만 사용.
 
-    신규진입: buy >= 6 (55%) → 진입 적합, sell >= 7 (64%) → 진입 보류
-    보유판단: buy >= 6 (55%) → 보유 유지, sell >= 7 (64%) → 매도 검토
+    신규진입: buy >= 6 → 진입 적합, sell >= 7 → 진입 보류
+    Weinstein Stage 3 → 진입 격하(조정 후 진입), Stage 4 → 진입 보류 강제
     """
     buy  = int(row.get("매수신호", 0))
     sell = int(row.get("매도신호", 0))
     rsi  = float(row.get("RSI(14)", 50))
     div  = str(row.get("RSI다이버전스", "-"))
+
+    # Weinstein Stage: 정수(검진) 또는 "Stage3-주의" 문자열(기술표) 모두 처리
+    ws_raw = row.get("weinstein_stage", row.get("Weinstein", ""))
+    ws_str = str(ws_raw)
+    if ws_str.isdigit():
+        ws = int(ws_str)
+    elif len(ws_str) > 5 and ws_str[:5] == "Stage" and ws_str[5].isdigit():
+        ws = int(ws_str[5])
+    else:
+        ws = 0  # 알 수 없음
 
     bearish    = div in ("🔴 일반약세", "🟠 숨겨진약세")
     bullish    = div in ("🟢 일반강세", "🔵 숨겨진강세")
@@ -1044,10 +1054,10 @@ def position_guidance(row: pd.Series) -> tuple[str, str]:
     oversold   = rsi <= 30
 
     # 신규 진입
-    if sell >= 7 or (bearish and sell >= 5):
+    if sell >= 7 or (bearish and sell >= 5) or ws == 4:
         entry = "⛔ 진입 보류"
-    elif buy >= 6 and overbought:
-        entry = "⏳ 조정 후 진입"
+    elif buy >= 6 and (overbought or ws == 3):
+        entry = "⏳ 조정 후 진입"   # 천정권(Stage3) 또는 과매수 — 새 진입 자제
     elif buy >= 6:
         entry = "✅ 진입 적합"
     elif oversold and bullish:
@@ -1056,10 +1066,10 @@ def position_guidance(row: pd.Series) -> tuple[str, str]:
         entry = "👀 관망"
 
     # 보유 판단
-    if sell >= 7 or (bearish and sell >= 5):
+    if sell >= 7 or (bearish and sell >= 5) or ws == 4:
         hold = "🚨 매도 검토"
-    elif overbought and sell >= 4 and not bullish:
-        hold = "⚠️ 부분 차익 검토"
+    elif (overbought and sell >= 4 and not bullish) or (ws == 3 and sell >= 3):
+        hold = "⚠️ 부분 차익 검토"   # Stage3 + 매도신호 일부 → 차익실현 고려
     elif buy >= 4 and sell >= 4:
         hold = "👀 신호 혼재"
     elif buy >= 6 or bullish:
@@ -1386,10 +1396,11 @@ def compute_checkup(ticker_input: str, phase: str) -> dict | None:
 
         # ── 종합 진단 ────────────────────────────────────────────────────────
         synth = pd.Series({
-            "매수신호":      buy_score,
-            "매도신호":      sell_score,
-            "RSI(14)":      rsi_val,
-            "RSI다이버전스": divergence,
+            "매수신호":        buy_score,
+            "매도신호":        sell_score,
+            "RSI(14)":        rsi_val,
+            "RSI다이버전스":   divergence,
+            "weinstein_stage": ws,
         })
         entry, hold = position_guidance(synth)
 
@@ -1780,6 +1791,13 @@ def tab_checkup(phase: str | None) -> None:
         f"총 {total_sig}개 신호 중 매수 {r['buy_score']}개 / 매도 {r['sell_score']}개. "
         "3개 이상이면 해당 방향 신호 우세로 판단. "
         "Weinstein Stage 2 + 매수신호 ≥ 3 조합이 가장 선호되는 진입 조건입니다."
+    )
+    st.markdown(
+        "<style>"
+        "[data-testid='stMetricLabel'] p { font-size:0.7rem !important; white-space:normal !important; line-height:1.3 !important; }"
+        "[data-testid='stMetricDelta']  { font-size:0.67rem !important; }"
+        "</style>",
+        unsafe_allow_html=True,
     )
 
     g1, g2, g3, g4, g5 = st.columns(5)
