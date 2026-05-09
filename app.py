@@ -343,6 +343,12 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
         try:
             hist = yf.Ticker(ticker).history(period="1y", interval="1d", auto_adjust=True)
             hist = hist.dropna(subset=["Close", "High", "Low", "Volume"])
+            # .KS 데이터 부족 시 .KQ(KOSDAQ)로 재시도
+            if len(hist) < 52 and ticker.endswith(".KS"):
+                alt = ticker.replace(".KS", ".KQ")
+                hist = yf.Ticker(alt).history(period="1y", interval="1d", auto_adjust=True)
+                hist = hist.dropna(subset=["Close", "High", "Low", "Volume"])
+                ticker = alt  # 이후 base 계산에 반영
             if len(hist) < 52:
                 continue
             close  = hist["Close"]
@@ -501,7 +507,7 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
             ws = weinstein_stage(close)
             ws_label = {1: "Stage1-대기", 2: "Stage2-매수", 3: "Stage3-주의", 4: "Stage4-회피"}.get(ws, "-")
 
-            base = ticker.replace(".KS", "")
+            base = ticker.replace(".KS", "").replace(".KQ", "")
             name = TICKER_NAMES.get(base, base)
 
             rows.append({
@@ -531,9 +537,13 @@ def fetch_weekly_rsi(tickers: tuple[str, ...]) -> dict[str, float]:
     for ticker in tickers:
         try:
             hist_w = yf.Ticker(ticker).history(period="2y", interval="1wk", auto_adjust=True)
+            if len(hist_w) < 14 and ticker.endswith(".KS"):
+                alt = ticker.replace(".KS", ".KQ")
+                hist_w = yf.Ticker(alt).history(period="2y", interval="1wk", auto_adjust=True)
+                ticker = alt
             if len(hist_w) >= 14:
                 rsi_w = RSIIndicator(close=hist_w["Close"], window=14).rsi()
-                result[ticker.replace(".KS", "")] = round(float(rsi_w.iloc[-1]), 1)
+                result[ticker.replace(".KS", "").replace(".KQ", "")] = round(float(rsi_w.iloc[-1]), 1)
         except Exception:
             continue
     return result
@@ -2139,7 +2149,7 @@ def tab_korea() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
             # fdr 실패 시 yfinance 분봉 fallback
             rt_kr = fetch_realtime_prices(yf_tickers)
             for yf_t, d in rt_kr.items():
-                base = yf_t.replace(".KS", "")
+                base = yf_t.replace(".KS", "").replace(".KQ", "")
                 mask = kr_tech["티커"] == base
                 if mask.any():
                     kr_tech.loc[mask, "현재가"] = d["price"]
