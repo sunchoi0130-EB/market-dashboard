@@ -860,23 +860,16 @@ def highlight_signals(row: pd.Series) -> list[str]:
 
 def position_guidance(row: pd.Series) -> tuple[str, str]:
     """
-    신규진입·보유판단 레이블.
+    신규진입·보유판단 레이블 (11개 신호 기준 정수 비교).
     ※ 임계값은 휴리스틱 — 백테스팅 미검증. 참고용으로만 사용.
 
-    MAX_SIGNALS = 11 기준 비율:
-    - 매수 ≥ 60% (7/11) → 매수 우세
-    - 매수 ≥ 70% (8/11) → 강한 매수 우세
-    - 매도 ≥ 60% (7/11) → 매도 우세
-    - 매도 ≥ 40% + 약세 다이버전스 → 경계
+    신규진입: buy >= 6 (55%) → 진입 적합, sell >= 7 (64%) → 진입 보류
+    보유판단: buy >= 6 (55%) → 보유 유지, sell >= 7 (64%) → 매도 검토
     """
-    MAX_SIGNALS = 11
     buy  = int(row.get("매수신호", 0))
     sell = int(row.get("매도신호", 0))
     rsi  = float(row.get("RSI(14)", 50))
     div  = str(row.get("RSI다이버전스", "-"))
-
-    buy_pct  = buy  / MAX_SIGNALS
-    sell_pct = sell / MAX_SIGNALS
 
     bearish    = div in ("🔴 일반약세", "🟠 숨겨진약세")
     bullish    = div in ("🟢 일반강세", "🔵 숨겨진강세")
@@ -884,13 +877,11 @@ def position_guidance(row: pd.Series) -> tuple[str, str]:
     oversold   = rsi <= 30
 
     # 신규 진입
-    if sell_pct >= 0.6 or (bearish and sell_pct >= 0.4):
+    if sell >= 7 or (bearish and sell >= 5):
         entry = "⛔ 진입 보류"
-    elif buy_pct >= 0.7 and not overbought:
-        entry = "✅ 진입 적합"
-    elif buy_pct >= 0.6 and overbought:
+    elif buy >= 6 and overbought:
         entry = "⏳ 조정 후 진입"
-    elif buy_pct >= 0.6 and not overbought:
+    elif buy >= 6:
         entry = "✅ 진입 적합"
     elif oversold and bullish:
         entry = "🔍 분할 매수 검토"
@@ -898,15 +889,15 @@ def position_guidance(row: pd.Series) -> tuple[str, str]:
         entry = "👀 관망"
 
     # 보유 판단
-    if sell_pct >= 0.6 or (bearish and sell_pct >= 0.4):
+    if sell >= 7 or (bearish and sell >= 5):
         hold = "🚨 매도 검토"
-    elif overbought and sell_pct >= 0.3 and not bullish:
+    elif overbought and sell >= 4 and not bullish:
         hold = "⚠️ 부분 차익 검토"
-    elif buy_pct >= 0.3 and sell_pct >= 0.3:
+    elif buy >= 4 and sell >= 4:
         hold = "👀 신호 혼재"
-    elif buy_pct >= 0.5 or bullish:
+    elif buy >= 6 or bullish:
         hold = "✊ 보유 유지"
-    elif sell_pct >= 0.4:
+    elif sell >= 5:
         hold = "🚨 매도 검토"
     else:
         hold = "✊ 보유 유지"
@@ -1716,24 +1707,24 @@ def signal_legend() -> None:
 | 신규진입 | 지금 처음 매수하는 경우의 타이밍 판단 (아래 표 참고) |
 | 보유판단 | 이미 보유 중인 경우의 매도/유지 판단 (아래 표 참고) |
 
-**신규진입 / 보유판단 해석 기준** (10개 신호 기준 비율, 임계값은 휴리스틱)
+**신규진입 / 보유판단 해석 기준** (11개 신호 기준 정수, 임계값은 휴리스틱)
 
 | 신규진입 | 조건 |
 |---|---|
-| ✅ 진입 적합 | 매수신호 **≥ 60%** (7/11 이상), RSI 정상 범위 |
-| ⏳ 조정 후 진입 | 매수신호 **≥ 60%**, RSI 과매수 — 눌릴 때 진입 |
+| ✅ 진입 적합 | 매수신호 **≥ 6개** (55%↑), RSI 과매수 아님 |
+| ⏳ 조정 후 진입 | 매수신호 **≥ 6개**, RSI 과매수 — 눌릴 때 진입 |
 | 🔍 분할 매수 검토 | RSI 과매도 + 강세 다이버전스 |
-| ⛔ 진입 보류 | 매도신호 **≥ 60%**, or 약세 다이버전스 + 매도신호 ≥ 40% |
-| 👀 관망 | 신호 혼재 또는 방향 불명확 |
+| ⛔ 진입 보류 | 매도신호 **≥ 7개** (64%↑), or 약세 다이버전스 + 매도신호 ≥ 5개 |
+| 👀 관망 | 매수신호 5개 이하, 방향 불명확 |
 
 | 보유판단 | 조건 |
 |---|---|
-| ✊ 보유 유지 | 매수신호 **≥ 50%** (6/11) or 강세 다이버전스 |
-| ⚠️ 부분 차익 검토 | RSI 과매수 + 매도신호 ≥ 30% (다이버전스 없음) |
-| 👀 신호 혼재 | 매수·매도 신호 각 30% 이상 — 방향 불명확 |
-| 🚨 매도 검토 | 매도신호 **≥ 60%**, or 약세 다이버전스 + 매도신호 ≥ 40% |
+| ✊ 보유 유지 | 매수신호 **≥ 6개** (55%↑) or 강세 다이버전스 |
+| ⚠️ 부분 차익 검토 | RSI 과매수 + 매도신호 ≥ 4개 (다이버전스 없음) |
+| 👀 신호 혼재 | 매수·매도 신호 각 4개 이상 동시 — 방향 불명확 |
+| 🚨 매도 검토 | 매도신호 **≥ 7개** (64%↑), or 약세 다이버전스 + 매도신호 ≥ 5개 |
 
-> ⚠️ **비율 임계값(60%, 50% 등)은 검증되지 않은 휴리스틱입니다.** 투자 판단의 참고 보조 도구로만 사용하세요.
+> ⚠️ **임계값(6개, 7개 등)은 검증되지 않은 휴리스틱입니다.** 투자 판단의 참고 보조 도구로만 사용하세요.
 
 > **신규진입 ≠ 보유판단.** 신규 진입은 타이밍(과매수 피하기), 보유 판단은 추세(살아있는 한 유지)에 초점.
 
