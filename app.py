@@ -947,7 +947,7 @@ def render_alert_banner() -> None:
     # ── 감시 종목 수집 ──────────────────────────────────────────────────────
     us_base = list(dict.fromkeys(WATCHLIST + [t for picks in US_CLAUDE_PICKS.values() for t in picks]))
     kr_base = [f"{c}.KS" for picks in KR_CLAUDE_PICKS.values() for c in picks]
-    custom  = st.session_state.get("custom_tickers", [])
+    custom  = st.session_state.get("custom_watchlist", [])
     custom_us = [t for t in custom if not (t.endswith(".KS") or t.endswith(".KQ"))]
     custom_kr = [t for t in custom if t.endswith(".KS") or t.endswith(".KQ")]
 
@@ -1866,14 +1866,29 @@ def tab_checkup(phase: str | None) -> None:
     _apct = r["atr_pct"]
     _fmt  = (lambda v: f"{v:,.0f}원") if is_kr else (lambda v: f"${v:,.2f}")
 
-    t1, t2, t3, t4 = st.columns(4)
-    t1.metric("손절가 (타이트)", _fmt(_px - 1.5 * _atr), f"−{_apct * 1.5:.1f}%", delta_color="inverse")
-    t2.metric("손절가 (일반)",   _fmt(_px - 2.0 * _atr), f"−{_apct * 2.0:.1f}%", delta_color="inverse")
-    t3.metric("1차 목표가",      _fmt(_px + 2.0 * _atr), f"+{_apct * 2.0:.1f}%")
-    t4.metric("2차 목표가",      _fmt(_px + 3.5 * _atr), f"+{_apct * 3.5:.1f}%")
+    st.markdown(
+        "<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:8px 0'>"
+        + _mcard("손절가 (타이트)",
+                 _fmt(_px - 1.5 * _atr),
+                 f"−{_apct * 1.5:.1f}%  ·  R:R 1:{2.0/1.5:.1f}",
+                 "#FF3547", "#FF3547")
+        + _mcard("손절가 (일반)",
+                 _fmt(_px - 2.0 * _atr),
+                 f"−{_apct * 2.0:.1f}%  ·  R:R 1:{3.5/2.0:.1f}",
+                 "#FF8C00", "#FF8C00")
+        + _mcard("1차 목표가",
+                 _fmt(_px + 2.0 * _atr),
+                 f"+{_apct * 2.0:.1f}%",
+                 "#00C851", "#00C851")
+        + _mcard("2차 목표가",
+                 _fmt(_px + 3.5 * _atr),
+                 f"+{_apct * 3.5:.1f}%",
+                 "#00D4FF", "#00D4FF")
+        + "</div>",
+        unsafe_allow_html=True,
+    )
     st.caption(
         f"ATR(14일) {_atr:.2f} ({_apct:.1f}%)  ·  "
-        f"타이트 R:R = 1:{2.0/1.5:.1f}  ·  일반 R:R = 1:{3.5/2.0:.1f}  ·  "
         "볼린저밴드 하단·52주 저점 등과 함께 확인 권고. 투자 조언 아님."
     )
 
@@ -1891,21 +1906,35 @@ def tab_checkup(phase: str | None) -> None:
     if not bt:
         st.info("데이터 부족 또는 해당 기간 신호 미발생 (상장 1년 미만이거나 신호 조건 미충족).")
     else:
-        b1, b2, b3, b4 = st.columns(4)
-        b1.metric("신호 발생 횟수",     f"{bt['n']}회",            "최근 1년")
-        b2.metric("승률 (1개월 후 +)",  f"{bt['win_rate']:.0f}%",  "50%↑이면 유효한 신호")
-        b3.metric("평균 수익률",         f"{bt['avg']:+.1f}%",
-                  delta_color="normal" if bt["avg"] > 0 else "inverse")
-        b4.metric("최대 / 최소",         f"{bt['best']:+.1f}%",      f"최소 {bt['worst']:+.1f}%")
+        _wr_c  = "#00C851" if bt["win_rate"] >= 50 else "#FF3547"
+        _avg_c = "#00C851" if bt["avg"] > 0 else "#FF3547"
+        st.markdown(
+            "<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:8px 0'>"
+            + _mcard("신호 발생 횟수",    f"{bt['n']}회",            "최근 1년")
+            + _mcard("승률 (1개월 후 +)", f"{bt['win_rate']:.0f}%",  "50%↑이면 유효", _wr_c, _wr_c)
+            + _mcard("평균 수익률",        f"{bt['avg']:+.1f}%",      "신호 후 1개월 평균", _avg_c, _avg_c)
+            + _mcard("최대 / 최소",        f"{bt['best']:+.1f}%",     f"최소 {bt['worst']:+.1f}%")
+            + "</div>",
+            unsafe_allow_html=True,
+        )
         if bt["recent"]:
-            st.markdown("**최근 신호 발생 이력:**")
+            rows = ""
             for _dt, _ret in reversed(bt["recent"]):
                 _c = "#00C851" if _ret > 0 else "#FF3547"
-                st.markdown(
-                    f"- {_dt} 신호 발생 → 1개월 후 "
-                    f"<span style='color:{_c};font-weight:600'>{_ret:+.1f}%</span>",
-                    unsafe_allow_html=True,
+                rows += (
+                    f"<div style='display:flex;justify-content:space-between;"
+                    f"padding:5px 12px;background:#1A1F2E;border-radius:5px;"
+                    f"margin:3px 0;font-size:0.82rem'>"
+                    f"<span style='color:#aaa'>{_dt} 신호</span>"
+                    f"<span style='color:{_c};font-weight:600'>1개월 후 {_ret:+.1f}%</span>"
+                    f"</div>"
                 )
+            st.markdown(
+                "<div style='margin-top:8px'>"
+                "<div style='color:#aaa;font-size:0.72rem;margin-bottom:4px'>최근 신호 이력</div>"
+                + rows + "</div>",
+                unsafe_allow_html=True,
+            )
 
     # ── 7. 한국 종목 수급 ─────────────────────────────────────────────────────
     if is_kr:
@@ -2727,22 +2756,42 @@ def main() -> None:
 - 기술지표: ta 라이브러리
         """)
         st.divider()
-        st.markdown("**내 관심종목 추가 (알림 포함)**")
-        st.caption("한 줄에 하나. 미국: NVDA / 한국: 005930")
-        custom_raw = st.text_area(
-            "관심종목",
-            placeholder="NVDA\nAMD\n005930",
-            height=90,
+        st.markdown("**내 관심종목 (알림 포함)**")
+        st.caption("입력 후 Enter로 추가. 미국: NVDA / 한국: 005930")
+
+        if "custom_watchlist" not in st.session_state:
+            st.session_state["custom_watchlist"] = []
+        if "_cwl_key" not in st.session_state:
+            st.session_state["_cwl_key"] = 0
+
+        _new_t = st.text_input(
+            "추가",
+            placeholder="NVDA 또는 005930",
             label_visibility="collapsed",
-            key="custom_watchlist_input",
+            key=f"cwl_input_{st.session_state['_cwl_key']}",
         )
-        parsed_custom: list[str] = []
-        for _line in custom_raw.splitlines():
-            _t = _line.strip().upper()
-            if not _t:
-                continue
-            parsed_custom.append(f"{_t.zfill(6)}.KS" if _t.isdigit() else _t)
-        st.session_state["custom_tickers"] = parsed_custom
+        if _new_t.strip():
+            _t2 = _new_t.strip().upper()
+            _parsed2 = f"{_t2.zfill(6)}.KS" if _t2.isdigit() else _t2
+            if _parsed2 not in st.session_state["custom_watchlist"]:
+                st.session_state["custom_watchlist"].append(_parsed2)
+            st.session_state["_cwl_key"] += 1
+            st.rerun()
+
+        _wl = st.session_state["custom_watchlist"]
+        if _wl:
+            for _idx, _tk in enumerate(_wl):
+                _disp = _tk.replace(".KS", "").replace(".KQ", "")
+                _ca, _cb = st.columns([5, 1])
+                _ca.markdown(f"<span style='font-size:0.85rem'>{_disp}</span>", unsafe_allow_html=True)
+                if _cb.button("✕", key=f"rm_{_idx}_{_tk}", help="삭제"):
+                    st.session_state["custom_watchlist"].pop(_idx)
+                    st.rerun()
+            if st.button("전체 삭제", use_container_width=True):
+                st.session_state["custom_watchlist"].clear()
+                st.rerun()
+        else:
+            st.caption("추가된 종목 없음")
         st.divider()
         st.markdown("""
 **Claude 추천 업데이트**
