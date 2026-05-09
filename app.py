@@ -2725,6 +2725,81 @@ Claude가 웹 검색으로 현재 시황·뉴스·섹터 흐름을 파악한 후
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
+def render_watchlist_status() -> None:
+    """내 관심종목 전체를 신호 강도와 무관하게 항상 표시."""
+    wl = st.session_state.get("custom_watchlist", [])
+    if not wl:
+        return
+
+    us_tickers = tuple(t for t in wl if not (t.endswith(".KS") or t.endswith(".KQ")))
+    kr_tickers = tuple(t for t in wl if t.endswith(".KS") or t.endswith(".KQ"))
+
+    frames = []
+    for tup in [us_tickers, kr_tickers]:
+        if tup:
+            df = fetch_technical_signals(tup)
+            if not df.empty:
+                frames.append(df)
+
+    if not frames:
+        return
+
+    all_df = pd.concat(frames, ignore_index=True)
+    all_df[["신규진입", "보유판단"]] = all_df.apply(
+        lambda row: pd.Series(position_guidance(row)), axis=1
+    )
+
+    _ec_map = {
+        "✅ 진입 적합":      "#00C851",
+        "⏳ 조정 후 진입":   "#FFD700",
+        "🔍 분할 매수 검토": "#00D4FF",
+        "⛔ 진입 보류":      "#FF3547",
+        "👀 관망":           "#888888",
+    }
+
+    def _wl_name(ticker: str) -> str:
+        base = ticker.replace(".KS", "").replace(".KQ", "")
+        return TICKER_NAMES.get(base, KR_CLAUDE_PICK_NAMES.get(base, base))
+
+    rows_html = ""
+    for _, row in all_df.iterrows():
+        buy  = int(row["매수신호"])
+        sell = int(row["매도신호"])
+        entry = row["신규진입"]
+        ret1m = row.get("1개월(%)", float("nan"))
+        bc = "#00C851" if buy  >= 6 else "#FAFAFA"
+        sc = "#FF3547" if sell >= 7 else "#FAFAFA"
+        ec = _ec_map.get(entry, "#888888")
+        rc = ("#00C851" if ret1m > 0 else "#FF3547") if pd.notna(ret1m) else "#aaa"
+        ret_str = f"{ret1m:+.1f}%" if pd.notna(ret1m) else "—"
+        rows_html += (
+            f"<tr style='border-top:1px solid #2a2f3d'>"
+            f"<td style='padding:6px 6px 6px 0;font-weight:600;font-size:0.82rem'>{_wl_name(str(row['티커']))}</td>"
+            f"<td style='padding:6px 4px;text-align:center;color:{bc};font-weight:700'>{buy}</td>"
+            f"<td style='padding:6px 4px;text-align:center;color:{sc};font-weight:700'>{sell}</td>"
+            f"<td style='padding:6px 4px;color:{ec};font-size:0.75rem'>{entry}</td>"
+            f"<td style='padding:6px 0 6px 4px;text-align:right;color:{rc};font-size:0.8rem'>{ret_str}</td>"
+            f"</tr>"
+        )
+
+    st.markdown(
+        f"<div style='background:#1A1F2E;border-radius:8px;padding:12px 16px;margin:6px 0'>"
+        f"<div style='color:#aaa;font-size:0.7rem;margin-bottom:8px'>👁 내 관심종목 현황 ({len(all_df)}개)"
+        f"  <span style='color:#555;font-size:0.65rem'>— 매수/매도 신호 개수 · 진입 판단 · 1개월 수익률</span></div>"
+        f"<table style='width:100%;border-collapse:collapse'>"
+        f"<thead><tr style='color:#555;font-size:0.67rem'>"
+        f"<th style='text-align:left;padding:0 0 6px 0'>종목</th>"
+        f"<th style='text-align:center;padding:0 4px 6px'>매수</th>"
+        f"<th style='text-align:center;padding:0 4px 6px'>매도</th>"
+        f"<th style='text-align:left;padding:0 4px 6px'>진입 판단</th>"
+        f"<th style='text-align:right;padding:0 0 6px 4px'>1개월</th>"
+        f"</tr></thead>"
+        f"<tbody>{rows_html}</tbody>"
+        f"</table></div>",
+        unsafe_allow_html=True,
+    )
+
+
 def main() -> None:
     st.set_page_config(
         page_title="글로벌 시장 분석 대시보드",
@@ -2732,6 +2807,13 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="expanded",
     )
+
+    # URL 파라미터에서 관심종목 복원 (새로고침·북마크 유지)
+    if "custom_watchlist" not in st.session_state:
+        _wp = st.query_params.get("watch", "")
+        st.session_state["custom_watchlist"] = [t for t in _wp.split(",") if t.strip()] if _wp else []
+    if "_cwl_key" not in st.session_state:
+        st.session_state["_cwl_key"] = 0
 
     with st.sidebar:
         st.markdown("## 글로벌 시장 분석")
@@ -2756,13 +2838,8 @@ def main() -> None:
 - 기술지표: ta 라이브러리
         """)
         st.divider()
-        st.markdown("**내 관심종목 (알림 포함)**")
+        st.markdown("**내 관심종목**")
         st.caption("입력 후 Enter로 추가. 미국: NVDA / 한국: 005930")
-
-        if "custom_watchlist" not in st.session_state:
-            st.session_state["custom_watchlist"] = []
-        if "_cwl_key" not in st.session_state:
-            st.session_state["_cwl_key"] = 0
 
         _new_t = st.text_input(
             "추가",
@@ -2792,6 +2869,13 @@ def main() -> None:
                 st.rerun()
         else:
             st.caption("추가된 종목 없음")
+
+        # URL 파라미터 동기화 (북마크/새로고침 유지)
+        _sync = st.session_state.get("custom_watchlist", [])
+        if _sync:
+            st.query_params["watch"] = ",".join(_sync)
+        elif "watch" in st.query_params:
+            del st.query_params["watch"]
         st.divider()
         st.markdown("""
 **Claude 추천 업데이트**
@@ -2806,6 +2890,7 @@ Claude Code에서 요청:
     st.title("📊 글로벌 시장 분석 대시보드")
 
     render_alert_banner()
+    render_watchlist_status()
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["🌐 시장 개요", "🇺🇸 미국장", "🇰🇷 한국장", "📈 매수/매도 추천", "🔍 종목 검진"])
 
