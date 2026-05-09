@@ -985,11 +985,20 @@ def resolve_ticker(query: str) -> list[tuple[str, str, bool]]:
 def compute_checkup(ticker_input: str, phase: str) -> dict | None:
     """단일 종목 종합 검진 — RSI·SMA·MACD·BB·거래량·Ichimoku·MFI·Weinstein·Quality."""
     is_korean = ticker_input.isdigit() and len(ticker_input) == 6
-    yf_ticker = f"{ticker_input}.KS" if is_korean else ticker_input.upper()
     pf = (lambda v: f"{v:,.0f}") if is_korean else (lambda v: f"{v:.2f}")
     try:
-        hist = yf.Ticker(yf_ticker).history(period="1y", interval="1d", auto_adjust=True)
-        hist = hist.dropna(subset=["Close", "High", "Low", "Volume"])
+        if is_korean:
+            yf_ticker = f"{ticker_input}.KS"
+            hist = yf.Ticker(yf_ticker).history(period="1y", interval="1d", auto_adjust=True)
+            hist = hist.dropna(subset=["Close", "High", "Low", "Volume"])
+            if len(hist) < 60:  # KOSPI 실패 → KOSDAQ 시도
+                yf_ticker = f"{ticker_input}.KQ"
+                hist = yf.Ticker(yf_ticker).history(period="1y", interval="1d", auto_adjust=True)
+                hist = hist.dropna(subset=["Close", "High", "Low", "Volume"])
+        else:
+            yf_ticker = ticker_input.upper()
+            hist = yf.Ticker(yf_ticker).history(period="1y", interval="1d", auto_adjust=True)
+            hist = hist.dropna(subset=["Close", "High", "Low", "Volume"])
         if len(hist) < 60:
             return None
         close  = hist["Close"]
