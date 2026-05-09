@@ -856,10 +856,103 @@ def add_relative_strength(tech_df: pd.DataFrame, sp_ret: dict[str, float]) -> pd
     return df
 
 
+@st.cache_data(ttl=900)
+def get_market_phase() -> dict[str, dict]:
+    """S&P500·KOSPI를 200일선 대비로 강세/약세 판단."""
+    result: dict[str, dict] = {}
+    for sym, label in [("SPY", "S&P500"), ("^KS11", "KOSPI")]:
+        try:
+            hist = yf.Ticker(sym).history(period="1y", interval="1d", auto_adjust=True)
+            if len(hist) >= 200:
+                close = hist["Close"]
+                price   = float(close.iloc[-1])
+                sma200  = float(SMAIndicator(close=close, window=200).sma_indicator().iloc[-1])
+                pct_off = round((price / sma200 - 1) * 100, 1)
+                result[label] = {
+                    "phase":    "강세장" if price > sma200 else "약세장",
+                    "pct_off":  pct_off,
+                }
+        except Exception:
+            pass
+    return result
+
+
+@st.cache_data(ttl=3600)
+def compute_signal_backtest(yf_ticker: str) -> dict:
+    """과거 1년: RSI<35·SMA200위·MACD양수 중 2개↑ 충족 날 기준 1개월 후 수익률."""
+    try:
+        hist = yf.Ticker(yf_ticker).history(period="2y", interval="1d", auto_adjust=True)
+        hist = hist.dropna(subset=["Close"])
+        if len(hist) < 220 and yf_ticker.endswith(".KS"):
+            hist = yf.Ticker(yf_ticker.replace(".KS", ".KQ")).history(
+                period="2y", interval="1d", auto_adjust=True)
+            hist = hist.dropna(subset=["Close"])
+        if len(hist) < 220:
+            return {}
+        close = hist["Close"]
+
+        rsi_s    = RSIIndicator(close=close, window=14).rsi()
+        sma200_s = SMAIndicator(close=close, window=200).sma_indicator()
+        macd_s   = MACD(close=close).macd_diff()
+
+        sig = ((rsi_s < 35).astype(int) +
+               (close > sma200_s).astype(int) +
+               (macd_s > 0).astype(int)).dropna().iloc[-252:]
+
+        prev_i = -10
+        triggers: list[tuple[str, float]] = []
+        for i, (dt, val) in enumerate(sig.items()):
+            if val >= 2 and (i - prev_i) >= 5:
+                loc = close.index.get_loc(dt)
+                if loc + 22 < len(close):
+                    fwd = (float(close.iloc[loc + 22]) / float(close.iloc[loc]) - 1) * 100
+                    triggers.append((str(dt.date()), round(fwd, 1)))
+                    prev_i = i
+
+        if not triggers:
+            return {}
+        rets = [r for _, r in triggers]
+        return {
+            "n":        len(rets),
+            "win_rate": round(sum(r > 0 for r in rets) / len(rets) * 100, 1),
+            "avg":      round(sum(rets) / len(rets), 1),
+            "best":     round(max(rets), 1),
+            "worst":    round(min(rets), 1),
+            "recent":   triggers[-3:],
+        }
+    except Exception:
+        return {}
+
+
 def render_alert_banner() -> None:
-    """접속 시 감시 종목 중 강한 신호 종목만 상단에 표시."""
-    us_tickers = tuple(dict.fromkeys(WATCHLIST + [t for picks in US_CLAUDE_PICKS.values() for t in picks]))
-    kr_tickers = tuple(f"{c}.KS" for picks in KR_CLAUDE_PICKS.values() for c in picks)
+    """접속 시 시장 국면 + 강한 신호 종목을 상단에 표시."""
+    # ── 시장 국면 (3번: 항상 표시) ──────────────────────────────────────────
+    phase_data = get_market_phase()
+    if phase_data:
+        parts: list[str] = []
+        bear_exists = False
+        for market, info in phase_data.items():
+            color = "#00C851" if info["phase"] == "강세장" else "#FF3547"
+            sign  = "+" if info["pct_off"] >= 0 else ""
+            parts.append(
+                f"<span style='color:{color}'><b>{market}</b> {info['phase']} "
+                f"({sign}{info['pct_off']}% vs 200일선)</span>"
+            )
+            if info["phase"] == "약세장":
+                bear_exists = True
+        st.markdown("**시장 국면:**  " + "  &nbsp;·&nbsp;  ".join(parts), unsafe_allow_html=True)
+        if bear_exists:
+            st.warning("약세장 — 개별 종목 매수 신호 신뢰도 저하. 분할 진입 또는 관망 권고.")
+
+    # ── 감시 종목 수집 ──────────────────────────────────────────────────────
+    us_base = list(dict.fromkeys(WATCHLIST + [t for picks in US_CLAUDE_PICKS.values() for t in picks]))
+    kr_base = [f"{c}.KS" for picks in KR_CLAUDE_PICKS.values() for c in picks]
+    custom  = st.session_state.get("custom_tickers", [])
+    custom_us = [t for t in custom if not (t.endswith(".KS") or t.endswith(".KQ"))]
+    custom_kr = [t for t in custom if t.endswith(".KS") or t.endswith(".KQ")]
+
+    us_tickers = tuple(dict.fromkeys(us_base + custom_us))
+    kr_tickers = tuple(dict.fromkeys(kr_base + custom_kr))
 
     us_df = fetch_technical_signals(us_tickers)
     kr_df = fetch_technical_signals(kr_tickers)
@@ -868,7 +961,6 @@ def render_alert_banner() -> None:
     if not frames:
         return
     all_df = pd.concat(frames, ignore_index=True)
-
     all_df[["신규진입", "보유판단"]] = all_df.apply(
         lambda row: pd.Series(position_guidance(row)), axis=1
     )
@@ -877,42 +969,47 @@ def render_alert_banner() -> None:
     sell_hits = all_df[all_df["매도신호"] >= 7].sort_values("매도신호", ascending=False)
 
     if buy_hits.empty and sell_hits.empty:
+        st.caption(f"현재 강한 신호 없음  ·  감시 {len(all_df)}종목 기준  ·  {pd.Timestamp.now().strftime('%H:%M')} 조회")
         return
 
     def _name(ticker: str) -> str:
         base = ticker.replace(".KS", "").replace(".KQ", "")
         return TICKER_NAMES.get(base, KR_CLAUDE_PICK_NAMES.get(base, base))
 
-    label = f"🔔 오늘의 신호 알림  ·  매수 {len(buy_hits)}종목  ·  매도 {len(sell_hits)}종목"
+    def _card(name: str, buy: int, sell: int, entry: str, is_buy: bool) -> str:
+        color = "#00C851" if is_buy else "#FF3547"
+        bg    = "#0d2a18" if is_buy else "#2a0d0d"
+        return (
+            f"<div style='display:inline-block;padding:6px 10px;background:{bg};"
+            f"border-left:3px solid {color};border-radius:5px;margin:3px;"
+            f"font-size:0.78rem;line-height:1.5;vertical-align:top;min-width:110px'>"
+            f"<b>{name}</b><br>"
+            f"<span style='color:{color}'>매수 {buy} · 매도 {sell}</span><br>"
+            f"<span style='color:#aaa;font-size:0.72rem'>{entry}</span>"
+            f"</div>"
+        )
+
+    label = f"🔔 신호 알림  ·  매수 {len(buy_hits)}종목  ·  매도 {len(sell_hits)}종목"
     with st.expander(label, expanded=True):
         if not buy_hits.empty:
             st.markdown("**✅ 매수 신호 강함 (매수신호 ≥ 6)**")
-            cols = st.columns(min(len(buy_hits), 5))
-            for i, (_, row) in enumerate(buy_hits.head(5).iterrows()):
-                cols[i].metric(
-                    _name(str(row["티커"])),
-                    f"매수 {int(row['매수신호'])} · 매도 {int(row['매도신호'])}",
-                    row["신규진입"],
-                )
-            if len(buy_hits) > 5:
-                st.caption(f"외 {len(buy_hits) - 5}종목 — 미국장/한국장 탭에서 전체 확인")
+            html = "<div style='display:flex;flex-wrap:wrap;gap:4px;margin:4px 0'>"
+            for _, row in buy_hits.iterrows():
+                html += _card(_name(str(row["티커"])), int(row["매수신호"]), int(row["매도신호"]), row["신규진입"], True)
+            html += "</div>"
+            st.markdown(html, unsafe_allow_html=True)
 
         if not sell_hits.empty:
             st.markdown("**⛔ 매도/경계 신호 (매도신호 ≥ 7)**")
-            cols = st.columns(min(len(sell_hits), 5))
-            for i, (_, row) in enumerate(sell_hits.head(5).iterrows()):
-                cols[i].metric(
-                    _name(str(row["티커"])),
-                    f"매수 {int(row['매수신호'])} · 매도 {int(row['매도신호'])}",
-                    row["신규진입"],
-                    delta_color="inverse",
-                )
-            if len(sell_hits) > 5:
-                st.caption(f"외 {len(sell_hits) - 5}종목 — 미국장/한국장 탭에서 전체 확인")
+            html = "<div style='display:flex;flex-wrap:wrap;gap:4px;margin:4px 0'>"
+            for _, row in sell_hits.iterrows():
+                html += _card(_name(str(row["티커"])), int(row["매수신호"]), int(row["매도신호"]), row["신규진입"], False)
+            html += "</div>"
+            st.markdown(html, unsafe_allow_html=True)
 
         st.caption(
-            f"감시 종목 {len(all_df)}개 기준  ·  {pd.Timestamp.now().strftime('%H:%M')} 조회  ·  "
-            "캐시 기준 데이터 (새로고침: 사이드바 버튼)"
+            f"감시 {len(all_df)}종목 기준  ·  {pd.Timestamp.now().strftime('%H:%M')} 조회  ·  "
+            "사이드바에서 관심종목 추가 가능"
         )
 
 
@@ -1724,7 +1821,56 @@ def tab_checkup(phase: str | None) -> None:
         unsafe_allow_html=True,
     )
 
-    # ── 5. 한국 종목 수급 ─────────────────────────────────────────────────────
+    # ── 5. 매매 계획 — ATR 기반 손절·목표가 (2번) ────────────────────────────
+    st.markdown("---")
+    st.markdown("#### 매매 계획 (ATR 기반)")
+    _atr  = r["atr_val"]
+    _px   = r["price"]
+    _apct = r["atr_pct"]
+    _fmt  = (lambda v: f"{v:,.0f}원") if is_kr else (lambda v: f"${v:,.2f}")
+
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric("손절가 (타이트)", _fmt(_px - 1.5 * _atr), f"−{_apct * 1.5:.1f}%", delta_color="inverse")
+    t2.metric("손절가 (일반)",   _fmt(_px - 2.0 * _atr), f"−{_apct * 2.0:.1f}%", delta_color="inverse")
+    t3.metric("1차 목표가",      _fmt(_px + 2.0 * _atr), f"+{_apct * 2.0:.1f}%")
+    t4.metric("2차 목표가",      _fmt(_px + 3.5 * _atr), f"+{_apct * 3.5:.1f}%")
+    st.caption(
+        f"ATR(14일) {_atr:.2f} ({_apct:.1f}%)  ·  "
+        f"타이트 R:R = 1:{2.0/1.5:.1f}  ·  일반 R:R = 1:{3.5/2.0:.1f}  ·  "
+        "볼린저밴드 하단·52주 저점 등과 함께 확인 권고. 투자 조언 아님."
+    )
+
+    # ── 6. 신호 히스토리 백테스트 (4번) ─────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### 신호 히스토리 (과거 1년)")
+    st.caption(
+        "RSI < 35 · SMA200 위 · MACD 양수 중 2개↑ 충족 날 기준, 22거래일(1개월) 후 수익률. "
+        "이 종목에서 해당 신호 조합이 과거에 얼마나 유효했는지 참고하세요."
+    )
+    _bt_ticker = f"{ticker_input.zfill(6)}.KS" if is_kr else ticker_input.upper()
+    with st.spinner("과거 신호 이력 계산 중..."):
+        bt = compute_signal_backtest(_bt_ticker)
+
+    if not bt:
+        st.info("데이터 부족 또는 해당 기간 신호 미발생 (상장 1년 미만이거나 신호 조건 미충족).")
+    else:
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("신호 발생 횟수",     f"{bt['n']}회",            "최근 1년")
+        b2.metric("승률 (1개월 후 +)",  f"{bt['win_rate']:.0f}%",  "50%↑이면 유효한 신호")
+        b3.metric("평균 수익률",         f"{bt['avg']:+.1f}%",
+                  delta_color="normal" if bt["avg"] > 0 else "inverse")
+        b4.metric("최대 / 최소",         f"{bt['best']:+.1f}%",      f"최소 {bt['worst']:+.1f}%")
+        if bt["recent"]:
+            st.markdown("**최근 신호 발생 이력:**")
+            for _dt, _ret in reversed(bt["recent"]):
+                _c = "#00C851" if _ret > 0 else "#FF3547"
+                st.markdown(
+                    f"- {_dt} 신호 발생 → 1개월 후 "
+                    f"<span style='color:{_c};font-weight:600'>{_ret:+.1f}%</span>",
+                    unsafe_allow_html=True,
+                )
+
+    # ── 7. 한국 종목 수급 ─────────────────────────────────────────────────────
     if is_kr:
         st.markdown("---")
         st.markdown("#### 외국인/기관 순매매 (최근 5일)")
@@ -2543,6 +2689,23 @@ def main() -> None:
 - F&G: CNN Markets API
 - 기술지표: ta 라이브러리
         """)
+        st.divider()
+        st.markdown("**내 관심종목 추가 (알림 포함)**")
+        st.caption("한 줄에 하나. 미국: NVDA / 한국: 005930")
+        custom_raw = st.text_area(
+            "관심종목",
+            placeholder="NVDA\nAMD\n005930",
+            height=90,
+            label_visibility="collapsed",
+            key="custom_watchlist_input",
+        )
+        parsed_custom: list[str] = []
+        for _line in custom_raw.splitlines():
+            _t = _line.strip().upper()
+            if not _t:
+                continue
+            parsed_custom.append(f"{_t.zfill(6)}.KS" if _t.isdigit() else _t)
+        st.session_state["custom_tickers"] = parsed_custom
         st.divider()
         st.markdown("""
 **Claude 추천 업데이트**
