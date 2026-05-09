@@ -410,18 +410,29 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
                 signals.append("BB 상단 이탈")
                 sell_cnt += 1
 
-            # Ichimoku TK 크로스
+            # Ichimoku TK 크로스 + 구름 위치
             if len(close) >= 52:
                 try:
                     ich = IchimokuIndicator(high=high_s, low=low_s, window1=9, window2=26, window3=52)
                     tenkan = float(ich.ichimoku_conversion_line().iloc[-1])
                     kijun  = float(ich.ichimoku_base_line().iloc[-1])
+                    span_a = float(ich.ichimoku_a().iloc[-1])
+                    span_b = float(ich.ichimoku_b().iloc[-1])
                     if not (pd.isna(tenkan) or pd.isna(kijun)):
                         if tenkan > kijun:
                             signals.append("Ichimoku 골든TK")
                             buy_cnt += 1
                         else:
                             signals.append("Ichimoku 데드TK")
+                            sell_cnt += 1
+                    if not (pd.isna(span_a) or pd.isna(span_b)):
+                        cloud_top    = max(span_a, span_b)
+                        cloud_bottom = min(span_a, span_b)
+                        if price > cloud_top:
+                            signals.append("구름 위")
+                            buy_cnt += 1
+                        elif price < cloud_bottom:
+                            signals.append("구름 아래")
                             sell_cnt += 1
                 except Exception:
                     pass
@@ -441,6 +452,28 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
                             sell_cnt += 1
                 except Exception:
                     pass
+
+            # 거래량 (20일 평균 대비)
+            if len(vol_s) >= 20:
+                vol_avg20 = float(vol_s.iloc[-20:].mean())
+                if vol_avg20 > 0:
+                    vol_ratio = float(vol_s.iloc[-1]) / vol_avg20
+                    if vol_ratio >= 1.5:
+                        ret_1w = (price / float(close.iloc[-6]) - 1) * 100 if len(close) >= 6 else 0.0
+                        if ret_1w > 0:
+                            signals.append(f"고거래량 상승({vol_ratio:.1f}x)")
+                            buy_cnt += 1
+                        elif ret_1w < 0:
+                            signals.append(f"고거래량 하락({vol_ratio:.1f}x)")
+                            sell_cnt += 1
+
+            # 52주 신고가권
+            high52 = float(high_s.max())
+            low52  = float(low_s.min())
+            pos52  = round((price - low52) / (high52 - low52) * 100, 1) if high52 != low52 else 50.0
+            if price >= high52 * 0.95:
+                signals.append(f"52주신고가권({pos52:.0f}%)")
+                buy_cnt += 1
 
             # 모멘텀 수익률
             ret_1m  = round((price / float(close.iloc[-22]) - 1) * 100, 1) if len(close) >= 22 else float("nan")
@@ -799,10 +832,14 @@ def add_relative_strength(tech_df: pd.DataFrame, sp_ret: dict[str, float]) -> pd
 
 
 def highlight_signals(row: pd.Series) -> list[str]:
-    if row.get("매수신호", 0) >= 3:
+    if row.get("매수신호", 0) >= 6:
         return ["background-color:#0d3b1f"] * len(row)
-    if row.get("매도신호", 0) >= 3:
+    if row.get("매도신호", 0) >= 6:
         return ["background-color:#3b0d0d"] * len(row)
+    if row.get("매수신호", 0) >= 5:
+        return ["background-color:#0a2a15"] * len(row)
+    if row.get("매도신호", 0) >= 5:
+        return ["background-color:#2a0a0a"] * len(row)
     return [""] * len(row)
 
 
@@ -811,15 +848,20 @@ def position_guidance(row: pd.Series) -> tuple[str, str]:
     신규진입·보유판단 레이블.
     ※ 임계값은 휴리스틱 — 백테스팅 미검증. 참고용으로만 사용.
 
-    신호 최대 7개 기준:
-    - 매수 ≥ 4 = 57% 이상 → 과반 우세
-    - 매수 ≥ 5 = 71% 이상 → 강한 우세
-    - 매도 ≥ 4 = 57% 이상 → 과반 우세
+    MAX_SIGNALS = 10 기준 비율:
+    - 매수 ≥ 60% (6/10) → 매수 우세
+    - 매수 ≥ 70% (7/10) → 강한 매수 우세
+    - 매도 ≥ 60% (6/10) → 매도 우세
+    - 매도 ≥ 40% + 약세 다이버전스 → 경계
     """
+    MAX_SIGNALS = 10
     buy  = int(row.get("매수신호", 0))
     sell = int(row.get("매도신호", 0))
     rsi  = float(row.get("RSI(14)", 50))
     div  = str(row.get("RSI다이버전스", "-"))
+
+    buy_pct  = buy  / MAX_SIGNALS
+    sell_pct = sell / MAX_SIGNALS
 
     bearish    = div in ("🔴 일반약세", "🟠 숨겨진약세")
     bullish    = div in ("🟢 일반강세", "🔵 숨겨진강세")
@@ -827,36 +869,29 @@ def position_guidance(row: pd.Series) -> tuple[str, str]:
     oversold   = rsi <= 30
 
     # 신규 진입
-    # 매도 우세(4개 이상) 또는 약세 다이버전스 + 매도 3개 → 보류
-    if sell >= 4 or (bearish and sell >= 3):
+    if sell_pct >= 0.6 or (bearish and sell_pct >= 0.4):
         entry = "⛔ 진입 보류"
-    # 매수 5개 이상 + 과매수 아님 → 강한 진입
-    elif buy >= 5 and not overbought:
+    elif buy_pct >= 0.7 and not overbought:
         entry = "✅ 진입 적합"
-    # 매수 4개 이상 + 과매수 → 눌릴 때 진입
-    elif buy >= 4 and overbought:
+    elif buy_pct >= 0.6 and overbought:
         entry = "⏳ 조정 후 진입"
-    # 매수 4개 이상 → 진입 적합
-    elif buy >= 4 and not overbought:
+    elif buy_pct >= 0.6 and not overbought:
         entry = "✅ 진입 적합"
-    # 과매도 + 강세 다이버전스 → 소량 분할
     elif oversold and bullish:
         entry = "🔍 분할 매수 검토"
     else:
         entry = "👀 관망"
 
     # 보유 판단
-    # 매도 우세 먼저 체크 — buy 조건보다 우선
-    if sell >= 4 or (bearish and sell >= 3):
+    if sell_pct >= 0.6 or (bearish and sell_pct >= 0.4):
         hold = "🚨 매도 검토"
-    elif overbought and sell >= 3 and not bullish:
+    elif overbought and sell_pct >= 0.3 and not bullish:
         hold = "⚠️ 부분 차익 검토"
-    # 매수/매도 신호 동시 3개 이상 → 혼재, 관망
-    elif buy >= 3 and sell >= 3:
+    elif buy_pct >= 0.3 and sell_pct >= 0.3:
         hold = "👀 신호 혼재"
-    elif buy >= 4 or bullish:
+    elif buy_pct >= 0.5 or bullish:
         hold = "✊ 보유 유지"
-    elif sell >= 3:
+    elif sell_pct >= 0.4:
         hold = "🚨 매도 검토"
     else:
         hold = "✊ 보유 유지"
@@ -1617,22 +1652,27 @@ def tab_checkup(phase: str | None) -> None:
 def signal_legend() -> None:
     with st.expander("신호 읽는 법 (클릭해서 열기)"):
         st.markdown("""
-**매수신호 / 매도신호** 숫자는 아래 **7가지** 조건 중 몇 개가 해당되는지를 나타냅니다.
+**매수신호 / 매도신호** 숫자는 아래 **10가지** 조건 중 몇 개가 해당되는지를 나타냅니다.
 
-| 조건 | 매수 신호 | 매도 신호 |
-|---|---|---|
-| RSI(14) | **< 30** 과매도 → 반등 가능성 | **> 70** 과매수 → 조정 가능성 |
-| SMA50 (50일 이평선) | 현재가 **위** → 단기 상승 추세 | 현재가 **아래** → 단기 하락 추세 |
-| SMA200 (200일 이평선) | 현재가 **위** → 장기 상승 추세 | 현재가 **아래** → 장기 하락 추세 |
-| MACD | **골든크로스** (MACD > 시그널) → 상승 모멘텀 | **데드크로스** (MACD < 시그널) → 하락 모멘텀 |
-| 볼린저밴드 (20일, 2σ) | **하단 이탈** → 극단적 과매도 | **상단 이탈** → 극단적 과매수 |
-| Ichimoku TK크로스 | 전환선(9일) **>** 기준선(26일) → 단기 상승 압력 | 전환선 **<** 기준선 → 단기 하락 압력 |
-| MFI (거래량 반영 RSI) | **< 20** 과매도 → 자금 유입 가능 | **> 80** 과매수 → 자금 이탈 가능 |
+| # | 조건 | 매수 신호 | 매도 신호 |
+|---|---|---|---|
+| 1 | RSI(14) | **< 30** 과매도 → 반등 가능성 | **> 70** 과매수 → 조정 가능성 |
+| 2 | SMA50 (50일 이평선) | 현재가 **위** → 단기 상승 추세 | 현재가 **아래** → 단기 하락 추세 |
+| 3 | SMA200 (200일 이평선) | 현재가 **위** → 장기 상승 추세 | 현재가 **아래** → 장기 하락 추세 |
+| 4 | MACD | **골든크로스** (MACD > 시그널) → 상승 모멘텀 | **데드크로스** (MACD < 시그널) → 하락 모멘텀 |
+| 5 | 볼린저밴드 (20일, 2σ) | **하단 이탈** → 극단적 과매도 | **상단 이탈** → 극단적 과매수 |
+| 6 | Ichimoku TK크로스 | 전환선(9일) **>** 기준선(26일) → 단기 상승 압력 | 전환선 **<** 기준선 → 단기 하락 압력 |
+| 7 | Ichimoku 구름 위치 | 현재가 **구름 위** → 강세 추세 | 현재가 **구름 아래** → 약세 추세 |
+| 8 | MFI (거래량 반영 RSI) | **< 20** 과매도 → 자금 유입 가능 | **> 80** 과매수 → 자금 이탈 가능 |
+| 9 | 거래량 (20일 평균 1.5배↑) | 고거래량 **상승** → 상승 신뢰도 강화 | 고거래량 **하락** → 매도 압력 |
+| 10 | 52주 신고가권 (95% 이상) | 신고가권 → 모멘텀 지속 가능성 | — (매수 신호만 해당) |
 
-> RSI·볼린저·MFI는 중립 구간이면 신호 없음. 최대 매수신호 약 7개.
+> 조건별로 신호가 없으면 카운팅 안 됨. 이론적 최대: 매수 10개, 매도 9개.
 
-- **매수신호 3 이상** = 초록 배경 → 과반수 지표가 매수 신호
-- **매도신호 3 이상** = 빨강 배경 → 과반수 지표가 매도 신호
+- **매수신호 6 이상 (60%↑)** = 진한 초록 배경 → 매수 우세
+- **매수신호 5 이상 (50%↑)** = 연초록 배경 → 매수 관심
+- **매도신호 6 이상 (60%↑)** = 진한 빨강 배경 → 매도 우세
+- **매도신호 5 이상 (50%↑)** = 연빨강 배경 → 매도 경계
 
 **Weinstein 단계** (참고 컬럼 — 신호 카운팅 미포함)
 
@@ -1652,24 +1692,24 @@ def signal_legend() -> None:
 | 신규진입 | 지금 처음 매수하는 경우의 타이밍 판단 (아래 표 참고) |
 | 보유판단 | 이미 보유 중인 경우의 매도/유지 판단 (아래 표 참고) |
 
-**신규진입 / 보유판단 해석 기준** (신호 최대 7개 기준, 임계값은 휴리스틱)
+**신규진입 / 보유판단 해석 기준** (10개 신호 기준 비율, 임계값은 휴리스틱)
 
 | 신규진입 | 조건 |
 |---|---|
-| ✅ 진입 적합 | 매수신호 ≥ 4 (57% 이상), RSI 정상 범위 |
-| ⏳ 조정 후 진입 | 매수신호 ≥ 4, RSI 과매수 — 눌릴 때 진입 |
+| ✅ 진입 적합 | 매수신호 **≥ 60%** (6/10 이상), RSI 정상 범위 |
+| ⏳ 조정 후 진입 | 매수신호 **≥ 60%**, RSI 과매수 — 눌릴 때 진입 |
 | 🔍 분할 매수 검토 | RSI 과매도 + 강세 다이버전스 |
-| ⛔ 진입 보류 | 매도신호 ≥ 4, or 약세 다이버전스 + 매도신호 ≥ 3 |
+| ⛔ 진입 보류 | 매도신호 **≥ 60%**, or 약세 다이버전스 + 매도신호 ≥ 40% |
 | 👀 관망 | 신호 혼재 또는 방향 불명확 |
 
 | 보유판단 | 조건 |
 |---|---|
-| ✊ 보유 유지 | 매수신호 ≥ 4 or 강세 다이버전스 |
-| ⚠️ 부분 차익 검토 | RSI 과매수 + 매도신호 ≥ 3 (다이버전스 없음) |
-| 👀 신호 혼재 | 매수·매도 신호 각 3개 이상 — 방향 불명확 |
-| 🚨 매도 검토 | 매도신호 ≥ 4, or 약세 다이버전스 + 매도신호 ≥ 3 |
+| ✊ 보유 유지 | 매수신호 **≥ 50%** (5/10) or 강세 다이버전스 |
+| ⚠️ 부분 차익 검토 | RSI 과매수 + 매도신호 ≥ 30% (다이버전스 없음) |
+| 👀 신호 혼재 | 매수·매도 신호 각 30% 이상 — 방향 불명확 |
+| 🚨 매도 검토 | 매도신호 **≥ 60%**, or 약세 다이버전스 + 매도신호 ≥ 40% |
 
-> ⚠️ **임계값(4개, 3개 등)은 검증되지 않은 휴리스틱입니다.** 투자 판단의 참고 보조 도구로만 사용하세요.
+> ⚠️ **비율 임계값(60%, 50% 등)은 검증되지 않은 휴리스틱입니다.** 투자 판단의 참고 보조 도구로만 사용하세요.
 
 > **신규진입 ≠ 보유판단.** 신규 진입은 타이밍(과매수 피하기), 보유 판단은 추세(살아있는 한 유지)에 초점.
 
@@ -2173,27 +2213,27 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
 
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**매수 관심** (매수신호 ≥ 3) — 3개월 수익률순")
+            st.markdown("**매수 관심** (매수신호 ≥ 5, 50%↑) — 3개월 수익률순")
             buy_us = (
-                us_tech[us_tech["매수신호"] >= 3][rec_cols]
+                us_tech[us_tech["매수신호"] >= 5][rec_cols]
                 .sort_values("3개월(%)", ascending=False)
                 .copy()
             )
             if not buy_us.empty:
                 st.dataframe(buy_us, use_container_width=True, hide_index=True)
             else:
-                st.info("현재 매수신호 ≥3 종목 없음")
+                st.info("현재 매수신호 ≥5 종목 없음")
         with col2:
-            st.markdown("**매도/경계** (매도신호 ≥ 3) — 3개월 수익률 약세순")
+            st.markdown("**매도/경계** (매도신호 ≥ 5, 50%↑) — 3개월 수익률 약세순")
             sell_us = (
-                us_tech[us_tech["매도신호"] >= 3][rec_cols]
+                us_tech[us_tech["매도신호"] >= 5][rec_cols]
                 .sort_values("3개월(%)", ascending=True)
                 .copy()
             )
             if not sell_us.empty:
                 st.dataframe(sell_us, use_container_width=True, hide_index=True)
             else:
-                st.info("현재 매도신호 ≥3 종목 없음")
+                st.info("현재 매도신호 ≥5 종목 없음")
 
     st.divider()
 
@@ -2237,9 +2277,9 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
 
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**매수 관심** (기술매수신호 ≥ 3) — 외국인 방향 참고")
+            st.markdown("**매수 관심** (기술매수신호 ≥ 5, 50%↑) — 외국인 방향 참고")
             buy_kr = (
-                all_kr[all_kr["매수신호"] >= 3][rec_cols]
+                all_kr[all_kr["매수신호"] >= 5][rec_cols]
                 .sort_values("3개월(%)", ascending=False)
                 .copy()
             ) if "매수신호" in all_kr.columns else pd.DataFrame()
@@ -2249,12 +2289,12 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
                     use_container_width=True, hide_index=True,
                 )
             else:
-                st.info("현재 기술매수신호 ≥3 종목 없음")
+                st.info("현재 기술매수신호 ≥5 종목 없음")
 
         with col2:
-            st.markdown("**경계/매도** (기술매도신호 ≥ 3)")
+            st.markdown("**경계/매도** (기술매도신호 ≥ 5, 50%↑)")
             sell_kr = (
-                all_kr[all_kr["매도신호"] >= 3][rec_cols]
+                all_kr[all_kr["매도신호"] >= 5][rec_cols]
                 .sort_values("3개월(%)", ascending=True)
                 .copy()
             ) if "매도신호" in all_kr.columns else pd.DataFrame()
@@ -2264,7 +2304,7 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
                     use_container_width=True, hide_index=True,
                 )
             else:
-                st.info("현재 기술매도신호 ≥3 종목 없음")
+                st.info("현재 기술매도신호 ≥5 종목 없음")
 
     st.divider()
 
