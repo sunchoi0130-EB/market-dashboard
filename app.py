@@ -475,6 +475,21 @@ def fetch_technical_signals(tickers: tuple[str, ...]) -> pd.DataFrame:
                 signals.append(f"52주신고가권({pos52:.0f}%)")
                 buy_cnt += 1
 
+            # OBV (On Balance Volume) — 누적 거래량 추세
+            try:
+                obv_series = OnBalanceVolumeIndicator(close=close, volume=vol_s).on_balance_volume()
+                if len(obv_series) >= 20:
+                    obv_ma20 = float(obv_series.rolling(20).mean().iloc[-1])
+                    if not pd.isna(obv_ma20):
+                        if float(obv_series.iloc[-1]) > obv_ma20:
+                            signals.append("OBV 상승(매집)")
+                            buy_cnt += 1
+                        else:
+                            signals.append("OBV 하락(분산)")
+                            sell_cnt += 1
+            except Exception:
+                pass
+
             # 모멘텀 수익률
             ret_1m  = round((price / float(close.iloc[-22]) - 1) * 100, 1) if len(close) >= 22 else float("nan")
             ret_3m  = round((price / float(close.iloc[-63]) - 1) * 100, 1) if len(close) >= 63 else float("nan")
@@ -832,13 +847,13 @@ def add_relative_strength(tech_df: pd.DataFrame, sp_ret: dict[str, float]) -> pd
 
 
 def highlight_signals(row: pd.Series) -> list[str]:
-    if row.get("매수신호", 0) >= 6:
+    if row.get("매수신호", 0) >= 7:
         return ["background-color:#0d3b1f"] * len(row)
-    if row.get("매도신호", 0) >= 6:
+    if row.get("매도신호", 0) >= 7:
         return ["background-color:#3b0d0d"] * len(row)
-    if row.get("매수신호", 0) >= 5:
+    if row.get("매수신호", 0) >= 6:
         return ["background-color:#0a2a15"] * len(row)
-    if row.get("매도신호", 0) >= 5:
+    if row.get("매도신호", 0) >= 6:
         return ["background-color:#2a0a0a"] * len(row)
     return [""] * len(row)
 
@@ -848,13 +863,13 @@ def position_guidance(row: pd.Series) -> tuple[str, str]:
     신규진입·보유판단 레이블.
     ※ 임계값은 휴리스틱 — 백테스팅 미검증. 참고용으로만 사용.
 
-    MAX_SIGNALS = 10 기준 비율:
-    - 매수 ≥ 60% (6/10) → 매수 우세
-    - 매수 ≥ 70% (7/10) → 강한 매수 우세
-    - 매도 ≥ 60% (6/10) → 매도 우세
+    MAX_SIGNALS = 11 기준 비율:
+    - 매수 ≥ 60% (7/11) → 매수 우세
+    - 매수 ≥ 70% (8/11) → 강한 매수 우세
+    - 매도 ≥ 60% (7/11) → 매도 우세
     - 매도 ≥ 40% + 약세 다이버전스 → 경계
     """
-    MAX_SIGNALS = 10
+    MAX_SIGNALS = 11
     buy  = int(row.get("매수신호", 0))
     sell = int(row.get("매도신호", 0))
     rsi  = float(row.get("RSI(14)", 50))
@@ -1193,6 +1208,14 @@ def compute_checkup(ticker_input: str, phase: str) -> dict | None:
                 _add(f"MFI {mfi_val:.1f}", "과매수 → 자금 이탈 가능성", -1)
             else:
                 _neutral(f"MFI {mfi_val:.1f}", "중립 구간 (20~80)")
+
+        # OBV (On Balance Volume) — 누적 거래량 추세
+        obv_ma20 = float(obv_series.rolling(20).mean().iloc[-1]) if len(obv_series) >= 20 else float("nan")
+        if not pd.isna(obv_ma20):
+            if float(obv_series.iloc[-1]) > obv_ma20:
+                _add("OBV 상승", "누적 거래량 20MA 위 → 매집 국면 (매수세 우위)", +1)
+            else:
+                _add("OBV 하락", "누적 거래량 20MA 아래 → 분산 국면 (매도세 우위)", -1)
 
         # ── 종합 진단 ────────────────────────────────────────────────────────
         synth = pd.Series({
@@ -1652,7 +1675,7 @@ def tab_checkup(phase: str | None) -> None:
 def signal_legend() -> None:
     with st.expander("신호 읽는 법 (클릭해서 열기)"):
         st.markdown("""
-**매수신호 / 매도신호** 숫자는 아래 **10가지** 조건 중 몇 개가 해당되는지를 나타냅니다.
+**매수신호 / 매도신호** 숫자는 아래 **11가지** 조건 중 몇 개가 해당되는지를 나타냅니다.
 
 | # | 조건 | 매수 신호 | 매도 신호 |
 |---|---|---|---|
@@ -1664,15 +1687,16 @@ def signal_legend() -> None:
 | 6 | Ichimoku TK크로스 | 전환선(9일) **>** 기준선(26일) → 단기 상승 압력 | 전환선 **<** 기준선 → 단기 하락 압력 |
 | 7 | Ichimoku 구름 위치 | 현재가 **구름 위** → 강세 추세 | 현재가 **구름 아래** → 약세 추세 |
 | 8 | MFI (거래량 반영 RSI) | **< 20** 과매도 → 자금 유입 가능 | **> 80** 과매수 → 자금 이탈 가능 |
-| 9 | 거래량 (20일 평균 1.5배↑) | 고거래량 **상승** → 상승 신뢰도 강화 | 고거래량 **하락** → 매도 압력 |
-| 10 | 52주 신고가권 (95% 이상) | 신고가권 → 모멘텀 지속 가능성 | — (매수 신호만 해당) |
+| 9 | OBV (누적 거래량 추세) | OBV **20MA 위** → 매집 국면 (매수세 우위) | OBV **20MA 아래** → 분산 국면 (매도세 우위) |
+| 10 | 거래량 (20일 평균 1.5배↑) | 고거래량 **상승** → 상승 신뢰도 강화 | 고거래량 **하락** → 매도 압력 |
+| 11 | 52주 신고가권 (95% 이상) | 신고가권 → 모멘텀 지속 가능성 | — (매수 신호만 해당) |
 
-> 조건별로 신호가 없으면 카운팅 안 됨. 이론적 최대: 매수 10개, 매도 9개.
+> 조건별로 신호가 없으면 카운팅 안 됨. 이론적 최대: 매수 11개, 매도 10개.
 
-- **매수신호 6 이상 (60%↑)** = 진한 초록 배경 → 매수 우세
-- **매수신호 5 이상 (50%↑)** = 연초록 배경 → 매수 관심
-- **매도신호 6 이상 (60%↑)** = 진한 빨강 배경 → 매도 우세
-- **매도신호 5 이상 (50%↑)** = 연빨강 배경 → 매도 경계
+- **매수신호 7 이상 (60%↑)** = 진한 초록 배경 → 매수 우세
+- **매수신호 6 이상 (55%↑)** = 연초록 배경 → 매수 관심
+- **매도신호 7 이상 (60%↑)** = 진한 빨강 배경 → 매도 우세
+- **매도신호 6 이상 (55%↑)** = 연빨강 배경 → 매도 경계
 
 **Weinstein 단계** (참고 컬럼 — 신호 카운팅 미포함)
 
@@ -1696,7 +1720,7 @@ def signal_legend() -> None:
 
 | 신규진입 | 조건 |
 |---|---|
-| ✅ 진입 적합 | 매수신호 **≥ 60%** (6/10 이상), RSI 정상 범위 |
+| ✅ 진입 적합 | 매수신호 **≥ 60%** (7/11 이상), RSI 정상 범위 |
 | ⏳ 조정 후 진입 | 매수신호 **≥ 60%**, RSI 과매수 — 눌릴 때 진입 |
 | 🔍 분할 매수 검토 | RSI 과매도 + 강세 다이버전스 |
 | ⛔ 진입 보류 | 매도신호 **≥ 60%**, or 약세 다이버전스 + 매도신호 ≥ 40% |
@@ -1704,7 +1728,7 @@ def signal_legend() -> None:
 
 | 보유판단 | 조건 |
 |---|---|
-| ✊ 보유 유지 | 매수신호 **≥ 50%** (5/10) or 강세 다이버전스 |
+| ✊ 보유 유지 | 매수신호 **≥ 50%** (6/11) or 강세 다이버전스 |
 | ⚠️ 부분 차익 검토 | RSI 과매수 + 매도신호 ≥ 30% (다이버전스 없음) |
 | 👀 신호 혼재 | 매수·매도 신호 각 30% 이상 — 방향 불명확 |
 | 🚨 매도 검토 | 매도신호 **≥ 60%**, or 약세 다이버전스 + 매도신호 ≥ 40% |
@@ -2213,9 +2237,9 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
 
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**매수 관심** (매수신호 ≥ 5, 50%↑) — 3개월 수익률순")
+            st.markdown("**매수 관심** (매수신호 ≥ 6, 55%↑) — 3개월 수익률순")
             buy_us = (
-                us_tech[us_tech["매수신호"] >= 5][rec_cols]
+                us_tech[us_tech["매수신호"] >= 6][rec_cols]
                 .sort_values("3개월(%)", ascending=False)
                 .copy()
             )
@@ -2224,9 +2248,9 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
             else:
                 st.info("현재 매수신호 ≥5 종목 없음")
         with col2:
-            st.markdown("**매도/경계** (매도신호 ≥ 5, 50%↑) — 3개월 수익률 약세순")
+            st.markdown("**매도/경계** (매도신호 ≥ 6, 55%↑) — 3개월 수익률 약세순")
             sell_us = (
-                us_tech[us_tech["매도신호"] >= 5][rec_cols]
+                us_tech[us_tech["매도신호"] >= 6][rec_cols]
                 .sort_values("3개월(%)", ascending=True)
                 .copy()
             )
@@ -2277,9 +2301,9 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
 
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**매수 관심** (기술매수신호 ≥ 5, 50%↑) — 외국인 방향 참고")
+            st.markdown("**매수 관심** (기술매수신호 ≥ 6, 55%↑) — 외국인 방향 참고")
             buy_kr = (
-                all_kr[all_kr["매수신호"] >= 5][rec_cols]
+                all_kr[all_kr["매수신호"] >= 6][rec_cols]
                 .sort_values("3개월(%)", ascending=False)
                 .copy()
             ) if "매수신호" in all_kr.columns else pd.DataFrame()
@@ -2292,9 +2316,9 @@ def tab_recommendations(phase: str | None, top10: pd.DataFrame, kr_tech: pd.Data
                 st.info("현재 기술매수신호 ≥5 종목 없음")
 
         with col2:
-            st.markdown("**경계/매도** (기술매도신호 ≥ 5, 50%↑)")
+            st.markdown("**경계/매도** (기술매도신호 ≥ 6, 55%↑)")
             sell_kr = (
-                all_kr[all_kr["매도신호"] >= 5][rec_cols]
+                all_kr[all_kr["매도신호"] >= 6][rec_cols]
                 .sort_values("3개월(%)", ascending=True)
                 .copy()
             ) if "매도신호" in all_kr.columns else pd.DataFrame()
